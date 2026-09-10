@@ -1,0 +1,34 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User{
+  id String @id @default(uuid())
+  name String 
+  email String @unique
+  password String
+  role UserRole @default(User)
+  avatar String?
+  @@map("users")
+
+}
+enum UserRole{
+  User
+  Admin
+  Manager
+}
+
+model Product {
+  id    String @id @default(uuid())
+  name  String
+  description String?
+  price Float
+  stock Int
+  @@map("products")
+}
+
+
