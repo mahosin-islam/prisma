@@ -4,8 +4,10 @@
   "description": "",
   "main": "index.js",
   "type": "module",
-  "scripts": {
+"scripts": {
     "dev": "tsx watch src/server.ts",
+    "build": "prisma generate",
+    "start": "tsx src/server.ts",
     "postinstall": "prisma generate",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
