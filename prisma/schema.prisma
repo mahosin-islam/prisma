@@ -14,7 +14,6 @@ model User{
   role UserRole @default(User)
   avatar String?
   @@map("users")
-
 }
 enum UserRole{
   User
