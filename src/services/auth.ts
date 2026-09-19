@@ -13,7 +13,7 @@ const authRouter = Router();
 // ═══════════════════════════════════════════════════════════
 authRouter.post("/register", async (req, res, next) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password } = req.body;
 
     // ── যাচাই ──
     if (!name || !email || !password) {
@@ -39,7 +39,6 @@ authRouter.post("/register", async (req, res, next) => {
         name,
         email,
         password: hashedPassword,
-        role: role === "ADMIN" ? "ADMIN" : "LEARNER", // ডিফল্ট LEARNER
       },
       select: {
         id: true,

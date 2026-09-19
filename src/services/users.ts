@@ -2,14 +2,31 @@ import { Router } from "express";
 import { prisma } from "../lib/prisma.js";
 import { sendResponse } from "../utils/response.js";
 import { AppError } from "../utils/AppError.js";
+import { authMiddleware } from "../middlewares/auth.middleware.js";
 
 const userRouter = Router();
-
-// ⚠️ আপাতত টোকেন/রোল চেক বন্ধ — পরে ফ্রন্টএন্ডের সময় যোগ করব
+userRouter.use(authMiddleware);
 
 // ═══════════════════════════════════════════════════════════
-// ১. GET / — সব ইউজার দেখা
-//    URL: GET /api/v1/users?search=mahosin&role=LEARNER
+// ১. GET /me — নিজের প্রোফাইল (সবার আগে!)
+// ═══════════════════════════════════════════════════════════
+userRouter.get("/me", async (req, res, next) => {
+  try {
+    const userId = req.user!.userId;
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true, name: true, email: true, role: true,
+        avatar: true, bio: true, createdAt: true,
+      },
+    });
+    if (!user) throw new AppError("User not found", 404);
+    sendResponse({ res, message: "Profile fetched", data: user });
+  } catch (error) { next(error); }
+});
+
+// ═══════════════════════════════════════════════════════════
+// ২. GET / — সব ইউজার
 // ═══════════════════════════════════════════════════════════
 userRouter.get("/", async (req, res, next) => {
   try {
@@ -30,13 +47,8 @@ userRouter.get("/", async (req, res, next) => {
     const users = await prisma.user.findMany({
       where,
       select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        avatar: true,
-        bio: true,
-        createdAt: true,
+        id: true, name: true, email: true, role: true,
+        avatar: true, bio: true, createdAt: true,
       },
       orderBy: { createdAt: "desc" },
     });
@@ -52,27 +64,26 @@ userRouter.get("/", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ২. GET /:id — একজন ইউজার দেখা
-//    URL: GET /api/v1/users/:id
+// ৩. GET /:id — একজন ইউজার
 // ═══════════════════════════════════════════════════════════
 userRouter.get("/:id", async (req, res, next) => {
   try {
     const id = req.params.id as string;
 
     const user = await prisma.user.findUnique({
-      where: { id },
+      where: { 
+        id,
+        isDeleted: false,     // ← এখানেই চেক
+      },
       select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        avatar: true,
-        bio: true,
-        createdAt: true,
+        id: true, name: true, email: true, role: true,
+        avatar: true, bio: true, createdAt: true,
       },
     });
 
-    if (!user) throw new AppError("User not found", 404);
+    if (!user) {
+      throw new AppError("User not found", 404);
+    }
 
     sendResponse({ res, message: "User fetched", data: user });
   } catch (error) {
@@ -81,9 +92,7 @@ userRouter.get("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৩. PATCH /:id — ইউজার আপডেট
-//    URL: PATCH /api/v1/users/:id
-//    Body: { name?, avatar?, bio?, role? }
+// ৪. PATCH /:id — ইউজার আপডেট
 // ═══════════════════════════════════════════════════════════
 userRouter.patch("/:id", async (req, res, next) => {
   try {
@@ -104,13 +113,8 @@ userRouter.patch("/:id", async (req, res, next) => {
         ...(role && { role }),
       },
       select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        avatar: true,
-        bio: true,
-        updatedAt: true,
+        id: true, name: true, email: true, role: true,
+        avatar: true, bio: true, updatedAt: true,
       },
     });
 
@@ -121,8 +125,7 @@ userRouter.patch("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৪. DELETE /:id — সফট ডিলিট
-//    URL: DELETE /api/v1/users/:id
+// ৫. DELETE /:id — সফট ডিলিট
 // ═══════════════════════════════════════════════════════════
 userRouter.delete("/:id", async (req, res, next) => {
   try {
@@ -133,8 +136,9 @@ userRouter.delete("/:id", async (req, res, next) => {
       throw new AppError("User not found", 404);
     }
 
-    await prisma.user.delete({
-      where: { id }
+    await prisma.user.update({                  // ← ✅ সফট ডিলিট
+      where: { id },
+      data: { isDeleted: true },
     });
 
     sendResponse({ res, message: "User deleted successfully" });

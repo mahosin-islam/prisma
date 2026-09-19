@@ -2,23 +2,23 @@ import { Router } from "express";
 import { prisma } from "../lib/prisma.js";
 import { sendResponse } from "../utils/response.js";
 import { AppError } from "../utils/AppError.js";
+import { authMiddleware } from "../middlewares/auth.middleware.js";
+import { roleMiddleware } from "../middlewares/role.middleware.js";
 
 const quizRouter = Router();
 
+quizRouter.use(authMiddleware);
+
 // ═══════════════════════════════════════════════════════════
-// ১. POST / — একটা কুইজ প্রশ্ন তৈরি
-//    URL: POST /api/v1/quizzes
+// 1. POST / — Create a quiz question (ADMIN only)
 //    Body: { lessonId, question, options, correctAnswer, order }
 // ═══════════════════════════════════════════════════════════
-quizRouter.post("/", async (req, res, next) => {
+quizRouter.post("/", roleMiddleware("ADMIN"), async (req, res, next) => {
   try {
     const { lessonId, question, options, correctAnswer, order } = req.body;
 
     if (!lessonId || !question || !options || !correctAnswer) {
-      throw new AppError(
-        "lessonId, question, options, and correctAnswer are required",
-        400
-      );
+      throw new AppError("lessonId, question, options, and correctAnswer are required", 400);
     }
 
     if (!Array.isArray(options) || options.length < 2) {
@@ -29,7 +29,6 @@ quizRouter.post("/", async (req, res, next) => {
       throw new AppError("correctAnswer must be one of the options", 400);
     }
 
-    // ── lesson আছে কি? ──
     const lesson = await prisma.lesson.findUnique({ where: { id: lessonId } });
     if (!lesson || lesson.isDeleted) {
       throw new AppError("Lesson not found", 404);
@@ -39,7 +38,6 @@ quizRouter.post("/", async (req, res, next) => {
       throw new AppError("Quizzes can only be added to QUIZ type lessons", 400);
     }
 
-    // ── order অটো সেট (না দিলে) ──
     let finalOrder = order;
     if (finalOrder === undefined) {
       const count = await prisma.quiz.count({ where: { lessonId } });
@@ -47,13 +45,7 @@ quizRouter.post("/", async (req, res, next) => {
     }
 
     const quiz = await prisma.quiz.create({
-      data: {
-        lessonId,
-        question,
-        options,
-        correctAnswer,
-        order: finalOrder,
-      },
+      data: { lessonId, question, options, correctAnswer, order: finalOrder },
     });
 
     sendResponse({
@@ -68,12 +60,10 @@ quizRouter.post("/", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ২. POST /bulk — একসাথে অনেক প্রশ্ন যোগ
-//    URL: POST /api/v1/quizzes/bulk
-//    Body: { lessonId, quizzes: [{ question, options,
-//                                  correctAnswer, order }] }
+// 2. POST /bulk — Create multiple quizzes at once (ADMIN only)
+//    Body: { lessonId, quizzes: [{ question, options, correctAnswer, order }] }
 // ═══════════════════════════════════════════════════════════
-quizRouter.post("/bulk", async (req, res, next) => {
+quizRouter.post("/bulk", roleMiddleware("ADMIN"), async (req, res, next) => {
   try {
     const { lessonId, quizzes } = req.body;
 
@@ -90,7 +80,6 @@ quizRouter.post("/bulk", async (req, res, next) => {
       throw new AppError("Quizzes can only be added to QUIZ type lessons", 400);
     }
 
-    // ── সব প্রশ্ন যাচাই ──
     for (let i = 0; i < quizzes.length; i++) {
       const q = quizzes[i];
       if (!q.question || !q.options || !q.correctAnswer) {
@@ -104,7 +93,6 @@ quizRouter.post("/bulk", async (req, res, next) => {
       }
     }
 
-    // ── order অটো ──
     const existingCount = await prisma.quiz.count({ where: { lessonId } });
 
     const result = await prisma.quiz.createMany({
@@ -134,8 +122,7 @@ quizRouter.post("/bulk", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৩. GET /lesson/:lessonId — একটা লেসনের সব প্রশ্ন
-//    URL: GET /api/v1/quizzes/lesson/:lessonId
+// 3. GET /lesson/:lessonId — Get all quizzes for a lesson
 // ═══════════════════════════════════════════════════════════
 quizRouter.get("/lesson/:lessonId", async (req, res, next) => {
   try {
@@ -157,8 +144,43 @@ quizRouter.get("/lesson/:lessonId", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৪. GET /:id — একটা প্রশ্ন দেখা
-//    URL: GET /api/v1/quizzes/:id
+// 4. GET /lesson/:lessonId/my-attempts/:learnerId
+// ═══════════════════════════════════════════════════════════
+quizRouter.get(
+  "/lesson/:lessonId/my-attempts/:learnerId",
+  async (req, res, next) => {
+    try {
+      const lessonId = req.params.lessonId as string;
+      const learnerId = req.params.learnerId as string;
+
+      const quizzes = await prisma.quiz.findMany({ where: { lessonId } });
+      const quizIds = quizzes.map((q) => q.id);
+
+      const attempts = await prisma.quizAttempt.findMany({
+        where: { learnerId, quizId: { in: quizIds } },
+        orderBy: { createdAt: "desc" },
+      });
+
+      const correctCount = attempts.filter((a) => a.isCorrect).length;
+
+      sendResponse({
+        res,
+        message: "Attempts fetched successfully",
+        data: {
+          totalQuizzes: quizzes.length,
+          totalAttempts: attempts.length,
+          correctAnswers: correctCount,
+          attempts,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════
+// 5. GET /:id — Get a single quiz
 // ═══════════════════════════════════════════════════════════
 quizRouter.get("/:id", async (req, res, next) => {
   try {
@@ -167,9 +189,7 @@ quizRouter.get("/:id", async (req, res, next) => {
     const quiz = await prisma.quiz.findUnique({
       where: { id },
       include: {
-        lesson: {
-          select: { id: true, title: true, moduleId: true },
-        },
+        lesson: { select: { id: true, title: true, moduleId: true } },
       },
     });
 
@@ -186,11 +206,9 @@ quizRouter.get("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৫. PATCH /:id — প্রশ্ন আপডেট
-//    URL: PATCH /api/v1/quizzes/:id
-//    Body: { question?, options?, correctAnswer?, order? }
+// 6. PATCH /:id — Update a quiz (ADMIN only)
 // ═══════════════════════════════════════════════════════════
-quizRouter.patch("/:id", async (req, res, next) => {
+quizRouter.patch("/:id", roleMiddleware("ADMIN"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const { question, options, correctAnswer, order } = req.body;
@@ -198,7 +216,6 @@ quizRouter.patch("/:id", async (req, res, next) => {
     const exists = await prisma.quiz.findUnique({ where: { id } });
     if (!exists) throw new AppError("Quiz not found", 404);
 
-    // ── correctAnswer যাচাই (options থাকলে) ──
     const finalOptions = options ?? (exists.options as string[]);
     const finalCorrect = correctAnswer ?? exists.correctAnswer;
 
@@ -227,10 +244,10 @@ quizRouter.patch("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৬. DELETE /:id — প্রশ্ন ডিলিট (হার্ড ডিলিট)
-//    URL: DELETE /api/v1/quizzes/:id
+// 7. DELETE /:id — Hard delete a quiz (ADMIN only)
+//    Note: Quiz model has no isDeleted field, so hard delete is intended.
 // ═══════════════════════════════════════════════════════════
-quizRouter.delete("/:id", async (req, res, next) => {
+quizRouter.delete("/:id", roleMiddleware("ADMIN"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
 
@@ -246,8 +263,7 @@ quizRouter.delete("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৭. POST /:id/attempt — ছাত্র কুইজের উত্তর দেবে
-//    URL: POST /api/v1/quizzes/:id/attempt
+// 8. POST /:id/attempt — Submit an answer to a single quiz
 //    Body: { learnerId, selectedAnswer }
 // ═══════════════════════════════════════════════════════════
 quizRouter.post("/:id/attempt", async (req, res, next) => {
@@ -265,23 +281,14 @@ quizRouter.post("/:id/attempt", async (req, res, next) => {
     const isCorrect = quiz.correctAnswer === selectedAnswer;
 
     const attempt = await prisma.quizAttempt.create({
-      data: {
-        learnerId,
-        quizId,
-        selectedAnswer,
-        isCorrect,
-      },
+      data: { learnerId, quizId, selectedAnswer, isCorrect },
     });
 
     sendResponse({
       res,
       statusCode: 201,
-      message: isCorrect ? "সঠিক উত্তর!" : "ভুল উত্তর",
-      data: {
-        attempt,
-        isCorrect,
-        correctAnswer: quiz.correctAnswer,
-      },
+      message: isCorrect ? "Correct answer!" : "Wrong answer",
+      data: { attempt, isCorrect, correctAnswer: quiz.correctAnswer },
     });
   } catch (error) {
     next(error);
@@ -289,8 +296,7 @@ quizRouter.post("/:id/attempt", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৮. POST /lesson/:lessonId/submit — পুরো কুইজ একসাথে সাবমিট
-//    URL: POST /api/v1/quizzes/lesson/:lessonId/submit
+// 9. POST /lesson/:lessonId/submit — Submit entire quiz
 //    Body: { learnerId, answers: [{ quizId, selectedAnswer }] }
 // ═══════════════════════════════════════════════════════════
 quizRouter.post("/lesson/:lessonId/submit", async (req, res, next) => {
@@ -307,7 +313,6 @@ quizRouter.post("/lesson/:lessonId/submit", async (req, res, next) => {
       throw new AppError("No quizzes found for this lesson", 404);
     }
 
-    // ── প্রতিটা উত্তর যাচাই ──
     const results = [];
     let correctCount = 0;
 
@@ -354,45 +359,5 @@ quizRouter.post("/lesson/:lessonId/submit", async (req, res, next) => {
     next(error);
   }
 });
-
-// ═══════════════════════════════════════════════════════════
-// ৯. GET /lesson/:lessonId/my-attempts/:learnerId
-//    URL: GET /api/v1/quizzes/lesson/:lessonId/my-attempts/:learnerId
-// ═══════════════════════════════════════════════════════════
-quizRouter.get(
-  "/lesson/:lessonId/my-attempts/:learnerId",
-  async (req, res, next) => {
-    try {
-      const lessonId = req.params.lessonId as string;
-      const learnerId = req.params.learnerId as string;
-
-      const quizzes = await prisma.quiz.findMany({ where: { lessonId } });
-      const quizIds = quizzes.map((q) => q.id);
-
-      const attempts = await prisma.quizAttempt.findMany({
-        where: {
-          learnerId,
-          quizId: { in: quizIds },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-
-      const correctCount = attempts.filter((a) => a.isCorrect).length;
-
-      sendResponse({
-        res,
-        message: "Attempts fetched successfully",
-        data: {
-          totalQuizzes: quizzes.length,
-          totalAttempts: attempts.length,
-          correctAnswers: correctCount,
-          attempts,
-        },
-      });
-    } catch (error) {
-      next(error);
-    }
-  }
-);
 
 export default quizRouter;

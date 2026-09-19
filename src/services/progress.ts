@@ -2,123 +2,15 @@ import { Router } from "express";
 import { prisma } from "../lib/prisma.js";
 import { sendResponse } from "../utils/response.js";
 import { AppError } from "../utils/AppError.js";
+import { authMiddleware } from "../middlewares/auth.middleware.js";
+import { roleMiddleware } from "../middlewares/role.middleware.js";
 
 const progressRouter = Router();
 
-// ═══════════════════════════════════════════════════════════
-// ১. POST /complete — লেসন সম্পন্ন করা
-//    URL: POST /api/v1/progress/complete
-//    Body: { learnerId, lessonId }
-// ═══════════════════════════════════════════════════════════
-progressRouter.post("/complete", async (req, res, next) => {
-  try {
-    const { learnerId, lessonId } = req.body;
-
-    if (!learnerId || !lessonId) {
-      throw new AppError("learnerId and lessonId are required", 400);
-    }
-
-    // ── Lesson আছে কি? ──
-    const lesson = await prisma.lesson.findUnique({
-      where: { id: lessonId },
-      include: {
-        module: {
-          include: {
-            course: true,
-          },
-        },
-      },
-    });
-
-    if (!lesson || lesson.isDeleted) {
-      throw new AppError("Lesson not found", 404);
-    }
-
-    // ── ছাত্র এনরোল করা আছে কি? ──
-    const enrollment = await prisma.enrollment.findFirst({
-      where: {
-        learnerId,
-        courseId: lesson.module.courseId,
-        ...(lesson.module.batchId && { batchId: lesson.module.batchId }),
-        status: "ACTIVE",
-        isDeleted: false,
-      },
-    });
-
-    if (!enrollment) {
-      throw new AppError("You are not enrolled in this course", 403);
-    }
-
-    // ── Progress আপডেট ──
-    const progress = await prisma.lessonProgress.upsert({
-      where: {
-        learnerId_lessonId: { learnerId, lessonId },
-      },
-      update: {
-        isCompleted: true,
-        isUnlocked: true,
-        completedAt: new Date(),
-      },
-      create: {
-        learnerId,
-        lessonId,
-        isCompleted: true,
-        isUnlocked: true,
-        completedAt: new Date(),
-      },
-    });
-
-    // ── পরের লেসন আনলক করো ──
-    const nextLesson = await prisma.lesson.findFirst({
-      where: {
-        moduleId: lesson.moduleId,
-        order: { gt: lesson.order },
-        isDeleted: false,
-      },
-      orderBy: { order: "asc" },
-    });
-
-    if (nextLesson) {
-      await prisma.lessonProgress.upsert({
-        where: {
-          learnerId_lessonId: { learnerId, lessonId: nextLesson.id },
-        },
-        update: { isUnlocked: true },
-        create: {
-          learnerId,
-          lessonId: nextLesson.id,
-          isUnlocked: true,
-          isCompleted: false,
-        },
-      });
-    }
-
-    // ── Enrollment progress (%) আপডেট ──
-    const updatedEnrollment = await recalculateProgress(
-      enrollment.id,
-      lesson.module.courseId,
-      lesson.module.batchId,
-      learnerId
-    );
-
-    sendResponse({
-      res,
-      message: "Lesson marked as completed",
-      data: {
-        progress,
-        nextLessonUnlocked: nextLesson
-          ? { id: nextLesson.id, title: nextLesson.title }
-          : null,
-        enrollmentProgress: updatedEnrollment.progress,
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
-});
+progressRouter.use(authMiddleware);
 
 // ═══════════════════════════════════════════════════════════
-// Helper: enrollment progress % হিসাব করে
+// Helper: Recalculate enrollment progress percentage
 // ═══════════════════════════════════════════════════════════
 async function recalculateProgress(
   enrollmentId: string,
@@ -126,7 +18,7 @@ async function recalculateProgress(
   batchId: string | null,
   learnerId: string
 ) {
-  // ── সব lesson এর ID ──
+  // Get all lessons in the course/batch
   const modules = await prisma.module.findMany({
     where: {
       courseId,
@@ -151,7 +43,7 @@ async function recalculateProgress(
     });
   }
 
-  // ── কতগুলো সম্পন্ন ──
+  // Count completed lessons
   const completedCount = await prisma.lessonProgress.count({
     where: {
       learnerId,
@@ -162,19 +54,127 @@ async function recalculateProgress(
 
   const percentage = Math.round((completedCount / totalLessons) * 100);
 
-  // ── Update enrollment ──
+  // Update enrollment
   return prisma.enrollment.update({
     where: { id: enrollmentId },
     data: {
       progress: percentage,
-      ...(percentage === 100 && { status: "COMPLETED", completedAt: new Date() }),
+      ...(percentage === 100 && {
+        status: "COMPLETED",
+        completedAt: new Date(),
+      }),
     },
   });
 }
 
 // ═══════════════════════════════════════════════════════════
-// ২. GET /my/:learnerId/course/:courseId
-//    URL: GET /api/v1/progress/my/:learnerId/course/:courseId
+// 1. POST /complete — Mark a lesson as completed
+//    Body: { learnerId, lessonId }
+// ═══════════════════════════════════════════════════════════
+progressRouter.post("/complete", async (req, res, next) => {
+  try {
+    const { learnerId, lessonId } = req.body;
+
+    if (!learnerId || !lessonId) {
+      throw new AppError("learnerId and lessonId are required", 400);
+    }
+
+    // Check if lesson exists
+    const lesson = await prisma.lesson.findUnique({
+      where: { id: lessonId },
+      include: { module: { include: { course: true } } },
+    });
+
+    if (!lesson || lesson.isDeleted) {
+      throw new AppError("Lesson not found", 404);
+    }
+
+    // Check if learner is enrolled
+    const enrollment = await prisma.enrollment.findFirst({
+      where: {
+        learnerId,
+        courseId: lesson.module.courseId,
+        ...(lesson.module.batchId && { batchId: lesson.module.batchId }),
+        status: "ACTIVE",
+        isDeleted: false,
+      },
+    });
+
+    if (!enrollment) {
+      throw new AppError("You are not enrolled in this course", 403);
+    }
+
+    // Update lesson progress
+    const progress = await prisma.lessonProgress.upsert({
+      where: {
+        learnerId_lessonId: { learnerId, lessonId },
+      },
+      update: {
+        isCompleted: true,
+        isUnlocked: true,
+        completedAt: new Date(),
+      },
+      create: {
+        learnerId,
+        lessonId,
+        isCompleted: true,
+        isUnlocked: true,
+        completedAt: new Date(),
+      },
+    });
+
+    // Unlock the next lesson
+    const nextLesson = await prisma.lesson.findFirst({
+      where: {
+        moduleId: lesson.moduleId,
+        order: { gt: lesson.order },
+        isDeleted: false,
+      },
+      orderBy: { order: "asc" },
+    });
+
+    if (nextLesson) {
+      await prisma.lessonProgress.upsert({
+        where: {
+          learnerId_lessonId: { learnerId, lessonId: nextLesson.id },
+        },
+        update: { isUnlocked: true },
+        create: {
+          learnerId,
+          lessonId: nextLesson.id,
+          isUnlocked: true,
+          isCompleted: false,
+        },
+      });
+    }
+
+    // Recalculate enrollment progress
+    const updatedEnrollment = await recalculateProgress(
+      enrollment.id,
+      lesson.module.courseId,
+      lesson.module.batchId,
+      learnerId
+    );
+
+    sendResponse({
+      res,
+      message: "Lesson marked as completed",
+      data: {
+        progress,
+        nextLessonUnlocked: nextLesson
+          ? { id: nextLesson.id, title: nextLesson.title }
+          : null,
+        enrollmentProgress: updatedEnrollment.progress,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// 2. GET /my/:learnerId/course/:courseId
+//    Get learner's progress for a specific course
 // ═══════════════════════════════════════════════════════════
 progressRouter.get(
   "/my/:learnerId/course/:courseId",
@@ -184,7 +184,6 @@ progressRouter.get(
       const courseId = req.params.courseId as string;
       const batchId = req.query.batchId as string | undefined;
 
-      // ── সব lesson + progress ──
       const modules = await prisma.module.findMany({
         where: {
           courseId,
@@ -197,9 +196,7 @@ progressRouter.get(
             where: { isDeleted: false },
             orderBy: { order: "asc" },
             include: {
-              lessonProgress: {
-                where: { learnerId },
-              },
+              lessonProgress: { where: { learnerId } },
             },
           },
         },
@@ -235,8 +232,8 @@ progressRouter.get(
 );
 
 // ═══════════════════════════════════════════════════════════
-// ৩. GET /lesson/:lessonId/check — লেসন লক/আনলক চেক
-//    URL: GET /api/v1/progress/lesson/:lessonId/check?learnerId=xxx
+// 3. GET /lesson/:lessonId/check — Check if lesson is locked
+//    Query: ?learnerId=xxx
 // ═══════════════════════════════════════════════════════════
 progressRouter.get("/lesson/:lessonId/check", async (req, res, next) => {
   try {
@@ -256,7 +253,7 @@ progressRouter.get("/lesson/:lessonId/check", async (req, res, next) => {
       throw new AppError("Lesson not found", 404);
     }
 
-    // ── এনরোলমেন্ট আছে কি? ──
+    // Check enrollment
     const enrollment = await prisma.enrollment.findFirst({
       where: {
         learnerId,
@@ -271,7 +268,7 @@ progressRouter.get("/lesson/:lessonId/check", async (req, res, next) => {
       throw new AppError("You are not enrolled in this course", 403);
     }
 
-    // ── আগের লেসন শেষ করেছে কি? ──
+    // Check if previous lesson is completed
     const previousLesson = await prisma.lesson.findFirst({
       where: {
         moduleId: lesson.moduleId,
@@ -292,7 +289,7 @@ progressRouter.get("/lesson/:lessonId/check", async (req, res, next) => {
       isUnlocked = prevProgress?.isCompleted ?? false;
     }
 
-    // ── Batch হলে availableAt চেক ──
+    // For BATCH courses, check availableAt date
     let dateUnlocked = true;
     if (lesson.availableAt) {
       dateUnlocked = new Date() >= lesson.availableAt;
@@ -319,8 +316,7 @@ progressRouter.get("/lesson/:lessonId/check", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৪. POST /unlock-first — নতুন এনরোলমেন্টে প্রথম লেসন আনলক
-//    URL: POST /api/v1/progress/unlock-first
+// 4. POST /unlock-first — Unlock the first lesson after enrollment
 //    Body: { learnerId, courseId, batchId? }
 // ═══════════════════════════════════════════════════════════
 progressRouter.post("/unlock-first", async (req, res, next) => {
@@ -331,7 +327,6 @@ progressRouter.post("/unlock-first", async (req, res, next) => {
       throw new AppError("learnerId and courseId are required", 400);
     }
 
-    // ── প্রথম module ──
     const firstModule = await prisma.module.findFirst({
       where: {
         courseId,
@@ -377,43 +372,44 @@ progressRouter.post("/unlock-first", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৫. DELETE /reset — ছাত্রের প্রোগ্রেস রিসেট (অ্যাডমিন)
-//    URL: DELETE /api/v1/progress/reset?learnerId=xxx&courseId=yyy
+// 5. DELETE /reset — Reset learner progress (ADMIN only)
+//    Query: ?learnerId=xxx&courseId=yyy
 // ═══════════════════════════════════════════════════════════
-progressRouter.delete("/reset", async (req, res, next) => {
-  try {
-    const learnerId = req.query.learnerId as string;
-    const courseId = req.query.courseId as string;
+progressRouter.delete(
+  "/reset",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const learnerId = req.query.learnerId as string;
+      const courseId = req.query.courseId as string;
 
-    if (!learnerId || !courseId) {
-      throw new AppError("learnerId and courseId query are required", 400);
+      if (!learnerId || !courseId) {
+        throw new AppError("learnerId and courseId query are required", 400);
+      }
+
+      const modules = await prisma.module.findMany({
+        where: { courseId, isDeleted: false },
+        include: {
+          lessons: { where: { isDeleted: false }, select: { id: true } },
+        },
+      });
+
+      const lessonIds = modules.flatMap((m) => m.lessons.map((l) => l.id));
+
+      await prisma.lessonProgress.deleteMany({
+        where: { learnerId, lessonId: { in: lessonIds } },
+      });
+
+      await prisma.enrollment.updateMany({
+        where: { learnerId, courseId },
+        data: { progress: 0, status: "ACTIVE", completedAt: null },
+      });
+
+      sendResponse({ res, message: "Progress reset successfully" });
+    } catch (error) {
+      next(error);
     }
-
-    const modules = await prisma.module.findMany({
-      where: { courseId, isDeleted: false },
-      include: {
-        lessons: { where: { isDeleted: false }, select: { id: true } },
-      },
-    });
-
-    const lessonIds = modules.flatMap((m) => m.lessons.map((l) => l.id));
-
-    await prisma.lessonProgress.deleteMany({
-      where: {
-        learnerId,
-        lessonId: { in: lessonIds },
-      },
-    });
-
-    await prisma.enrollment.updateMany({
-      where: { learnerId, courseId },
-      data: { progress: 0, status: "ACTIVE", completedAt: null },
-    });
-
-    sendResponse({ res, message: "Progress reset successfully" });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
 export default progressRouter;

@@ -2,110 +2,206 @@ import { Router } from "express";
 import { prisma } from "../lib/prisma.js";
 import { sendResponse } from "../utils/response.js";
 import { AppError } from "../utils/AppError.js";
+import { authMiddleware } from "../middlewares/auth.middleware.js";
+import { roleMiddleware } from "../middlewares/role.middleware.js";
 
 const assignmentRouter = Router();
 
+assignmentRouter.use(authMiddleware);
+
 // ═══════════════════════════════════════════════════════════
-// ১. POST / — নতুন অ্যাসাইনমেন্ট তৈরি (অ্যাডমিন)
-//    URL: POST /api/v1/assignments
+// 1. POST / — Create assignment (ADMIN only)
 //    Body: { moduleId, title, description?, docUrl?,
 //            deadline?, totalMarks?, notifyStudents? }
 // ═══════════════════════════════════════════════════════════
-assignmentRouter.post("/", async (req, res, next) => {
-  try {
-    const {
-      moduleId,
-      title,
-      description,
-      docUrl,
-      deadline,
-      totalMarks,
-      notifyStudents,
-    } = req.body;
-
-    if (!moduleId || !title) {
-      throw new AppError("moduleId and title are required", 400);
-    }
-
-    const moduleData = await prisma.module.findUnique({
-      where: { id: moduleId },
-      include: { course: true },
-    });
-
-    if (!moduleData || moduleData.isDeleted) {
-      throw new AppError("Module not found", 404);
-    }
-
-    const assignment = await prisma.assignment.create({
-      data: {
+assignmentRouter.post(
+  "/",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const {
         moduleId,
         title,
-        description: description ?? null,
-        docUrl: docUrl ?? null,
-        deadline: deadline ? new Date(deadline) : null,
-        totalMarks: totalMarks ?? 100,
-      },
-      include: {
-        module: {
-          select: { id: true, title: true, courseId: true, batchId: true },
+        description,
+        docUrl,
+        deadline,
+        totalMarks,
+        notifyStudents,
+      } = req.body;
+
+      if (!moduleId || !title) {
+        throw new AppError("moduleId and title are required", 400);
+      }
+
+      const moduleData = await prisma.module.findUnique({
+        where: { id: moduleId },
+        include: { course: true },
+      });
+
+      if (!moduleData || moduleData.isDeleted) {
+        throw new AppError("Module not found", 404);
+      }
+
+      const assignment = await prisma.assignment.create({
+        data: {
+          moduleId,
+          title,
+          description: description ?? null,
+          docUrl: docUrl ?? null,
+          deadline: deadline ? new Date(deadline) : null,
+          totalMarks: totalMarks ?? 100,
         },
-      },
-    });
-
-    // ── Notification পাঠাও ──
-    if (notifyStudents) {
-      let enrollments;
-
-      if (moduleData.batchId) {
-        enrollments = await prisma.enrollment.findMany({
-          where: {
-            batchId: moduleData.batchId,
-            status: "ACTIVE",
-            isDeleted: false,
+        include: {
+          module: {
+            select: { id: true, title: true, courseId: true, batchId: true },
           },
-          select: { learnerId: true },
-        });
-      } else {
-        enrollments = await prisma.enrollment.findMany({
-          where: {
-            courseId: moduleData.courseId,
-            status: "ACTIVE",
-            isDeleted: false,
-          },
-          select: { learnerId: true },
-        });
+        },
+      });
+
+      // Send notifications to enrolled students
+      if (notifyStudents) {
+        let enrollments;
+
+        if (moduleData.batchId) {
+          enrollments = await prisma.enrollment.findMany({
+            where: {
+              batchId: moduleData.batchId,
+              status: "ACTIVE",
+              isDeleted: false,
+            },
+            select: { learnerId: true },
+          });
+        } else {
+          enrollments = await prisma.enrollment.findMany({
+            where: {
+              courseId: moduleData.courseId,
+              status: "ACTIVE",
+              isDeleted: false,
+            },
+            select: { learnerId: true },
+          });
+        }
+
+        if (enrollments.length > 0) {
+          await prisma.notification.createMany({
+            data: enrollments.map((e) => ({
+              userId: e.learnerId,
+              batchId: moduleData.batchId,
+              type: "NEW_ASSIGNMENT",
+              title: "New Assignment",
+              message: `${title} — Deadline: ${deadline ?? "No deadline"}`,
+              link: `/assignments/${assignment.id}`,
+            })),
+          });
+        }
       }
 
-      if (enrollments.length > 0) {
-        await prisma.notification.createMany({
-          data: enrollments.map((e) => ({
-            userId: e.learnerId,
-            batchId: moduleData.batchId,
-            type: "NEW_ASSIGNMENT",
-            title: "📝 নতুন অ্যাসাইনমেন্ট",
-            message: `${title} — জমা দেওয়ার শেষ তারিখ ${deadline ?? "নেই"}`,
-            link: `/assignments/${assignment.id}`,
-          })),
-        });
-      }
+      sendResponse({
+        res,
+        statusCode: 201,
+        message: notifyStudents
+          ? "Assignment created and students notified"
+          : "Assignment created successfully",
+        data: assignment,
+      });
+    } catch (error) {
+      next(error);
     }
-
-    sendResponse({
-      res,
-      statusCode: 201,
-      message: notifyStudents
-        ? "Assignment created and students notified"
-        : "Assignment created successfully",
-      data: assignment,
-    });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
 // ═══════════════════════════════════════════════════════════
-// ২. GET /module/:moduleId — একটা মডিউলের সব অ্যাসাইনমেন্ট
-//    URL: GET /api/v1/assignments/module/:moduleId
+// 2. PATCH /submissions/:id/grade — Grade a submission (ADMIN only)
+//    Body: { marks, feedback? }
+//    ⚠️ Must come BEFORE /:id routes
+// ═══════════════════════════════════════════════════════════
+assignmentRouter.patch(
+  "/submissions/:id/grade",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const id = req.params.id as string;
+      const { marks, feedback } = req.body;
+
+      if (marks === undefined || marks === null) {
+        throw new AppError("marks is required", 400);
+      }
+
+      const submission = await prisma.assignmentSubmission.findUnique({
+        where: { id },
+        include: {
+          assignment: { select: { totalMarks: true, title: true } },
+        },
+      });
+
+      if (!submission) {
+        throw new AppError("Submission not found", 404);
+      }
+
+      if (marks < 0 || marks > submission.assignment.totalMarks) {
+        throw new AppError(
+          `marks must be between 0 and ${submission.assignment.totalMarks}`,
+          400
+        );
+      }
+
+      const updated = await prisma.assignmentSubmission.update({
+        where: { id },
+        data: {
+          marks,
+          feedback: feedback ?? null,
+          status: "GRADED",
+          gradedAt: new Date(),
+        },
+      });
+
+      // Notify the learner
+      await prisma.notification.create({
+        data: {
+          userId: submission.learnerId,
+          type: "ANNOUNCEMENT",
+          title: "Assignment Graded",
+          message: `${submission.assignment.title} — You scored ${marks}/${submission.assignment.totalMarks}`,
+        },
+      });
+
+      sendResponse({
+        res,
+        message: "Submission graded successfully",
+        data: updated,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════
+// 3. DELETE /submissions/:id — Delete a submission (ADMIN only)
+// ═══════════════════════════════════════════════════════════
+assignmentRouter.delete(
+  "/submissions/:id",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const id = req.params.id as string;
+
+      const exists = await prisma.assignmentSubmission.findUnique({
+        where: { id },
+      });
+      if (!exists) throw new AppError("Submission not found", 404);
+
+      await prisma.assignmentSubmission.delete({ where: { id } });
+
+      sendResponse({ res, message: "Submission deleted successfully" });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════
+// 4. GET /module/:moduleId — Get all assignments of a module
 // ═══════════════════════════════════════════════════════════
 assignmentRouter.get("/module/:moduleId", async (req, res, next) => {
   try {
@@ -130,43 +226,32 @@ assignmentRouter.get("/module/:moduleId", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৩. GET /:id — একটা অ্যাসাইনমেন্ট দেখা
-//    URL: GET /api/v1/assignments/:id
+// 5. GET /my/:learnerId — Get all submissions of a learner
 // ═══════════════════════════════════════════════════════════
-assignmentRouter.get("/:id", async (req, res, next) => {
+assignmentRouter.get("/my/:learnerId", async (req, res, next) => {
   try {
-    const id = req.params.id as string;
+    const learnerId = req.params.learnerId as string;
 
-    const assignment = await prisma.assignment.findUnique({
-      where: { id },
+    const submissions = await prisma.assignmentSubmission.findMany({
+      where: { learnerId },
+      orderBy: { submittedAt: "desc" },
       include: {
-        module: {
+        assignment: {
           select: {
             id: true,
             title: true,
-            courseId: true,
-            batchId: true,
-          },
-        },
-        submissions: {
-          orderBy: { submittedAt: "desc" },
-          include: {
-            learner: {
-              select: { id: true, name: true, email: true, avatar: true },
-            },
+            totalMarks: true,
+            deadline: true,
+            module: { select: { id: true, title: true, courseId: true } },
           },
         },
       },
     });
 
-    if (!assignment || assignment.isDeleted) {
-      throw new AppError("Assignment not found", 404);
-    }
-
     sendResponse({
       res,
-      message: "Assignment fetched successfully",
-      data: assignment,
+      message: "My submissions fetched successfully",
+      data: { submissions, total: submissions.length },
     });
   } catch (error) {
     next(error);
@@ -174,69 +259,105 @@ assignmentRouter.get("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৪. PATCH /:id — আপডেট (অ্যাডমিন)
-//    URL: PATCH /api/v1/assignments/:id
+// 6. GET /:id/submissions — Get all submissions (ADMIN only)
 // ═══════════════════════════════════════════════════════════
-assignmentRouter.patch("/:id", async (req, res, next) => {
-  try {
-    const id = req.params.id as string;
-    const { title, description, docUrl, deadline, totalMarks } = req.body;
+assignmentRouter.get(
+  "/:id/submissions",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const assignmentId = req.params.id as string;
 
-    const exists = await prisma.assignment.findUnique({ where: { id } });
-    if (!exists || exists.isDeleted) {
-      throw new AppError("Assignment not found", 404);
+      const submissions = await prisma.assignmentSubmission.findMany({
+        where: { assignmentId },
+        orderBy: { submittedAt: "desc" },
+        include: {
+          learner: {
+            select: { id: true, name: true, email: true, avatar: true },
+          },
+        },
+      });
+
+      sendResponse({
+        res,
+        message: "Submissions fetched successfully",
+        data: { submissions, total: submissions.length },
+      });
+    } catch (error) {
+      next(error);
     }
-
-    const assignment = await prisma.assignment.update({
-      where: { id },
-      data: {
-        ...(title && { title }),
-        ...(description !== undefined && { description }),
-        ...(docUrl !== undefined && { docUrl }),
-        ...(deadline !== undefined && {
-          deadline: deadline ? new Date(deadline) : null,
-        }),
-        ...(totalMarks !== undefined && { totalMarks }),
-      },
-    });
-
-    sendResponse({
-      res,
-      message: "Assignment updated successfully",
-      data: assignment,
-    });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
 // ═══════════════════════════════════════════════════════════
-// ৫. DELETE /:id — সফট ডিলিট
-//    URL: DELETE /api/v1/assignments/:id
+// 7. PATCH /:id — Update an assignment (ADMIN only)
 // ═══════════════════════════════════════════════════════════
-assignmentRouter.delete("/:id", async (req, res, next) => {
-  try {
-    const id = req.params.id as string;
+assignmentRouter.patch(
+  "/:id",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const id = req.params.id as string;
+      const { title, description, docUrl, deadline, totalMarks } = req.body;
 
-    const exists = await prisma.assignment.findUnique({ where: { id } });
-    if (!exists || exists.isDeleted) {
-      throw new AppError("Assignment not found", 404);
+      const exists = await prisma.assignment.findUnique({ where: { id } });
+      if (!exists || exists.isDeleted) {
+        throw new AppError("Assignment not found", 404);
+      }
+
+      const assignment = await prisma.assignment.update({
+        where: { id },
+        data: {
+          ...(title && { title }),
+          ...(description !== undefined && { description }),
+          ...(docUrl !== undefined && { docUrl }),
+          ...(deadline !== undefined && {
+            deadline: deadline ? new Date(deadline) : null,
+          }),
+          ...(totalMarks !== undefined && { totalMarks }),
+        },
+      });
+
+      sendResponse({
+        res,
+        message: "Assignment updated successfully",
+        data: assignment,
+      });
+    } catch (error) {
+      next(error);
     }
-
-    await prisma.assignment.update({
-      where: { id },
-      data: { isDeleted: true },
-    });
-
-    sendResponse({ res, message: "Assignment deleted successfully" });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
 // ═══════════════════════════════════════════════════════════
-// ৬. POST /:id/submit — ছাত্র অ্যাসাইনমেন্ট জমা দেবে
-//    URL: POST /api/v1/assignments/:id/submit
+// 8. DELETE /:id — Soft delete an assignment (ADMIN only)
+// ═══════════════════════════════════════════════════════════
+assignmentRouter.delete(
+  "/:id",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const id = req.params.id as string;
+
+      const exists = await prisma.assignment.findUnique({ where: { id } });
+      if (!exists || exists.isDeleted) {
+        throw new AppError("Assignment not found", 404);
+      }
+
+      await prisma.assignment.update({
+        where: { id },
+        data: { isDeleted: true },
+      });
+
+      sendResponse({ res, message: "Assignment deleted successfully" });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════
+// 9. POST /:id/submit — Learner submits an assignment
 //    Body: { learnerId, answerUrl, note? }
 // ═══════════════════════════════════════════════════════════
 assignmentRouter.post("/:id/submit", async (req, res, next) => {
@@ -257,7 +378,7 @@ assignmentRouter.post("/:id/submit", async (req, res, next) => {
       throw new AppError("Assignment not found", 404);
     }
 
-    // ── এনরোলমেন্ট চেক ──
+    // Check enrollment
     const enrollment = await prisma.enrollment.findFirst({
       where: {
         learnerId,
@@ -274,12 +395,12 @@ assignmentRouter.post("/:id/submit", async (req, res, next) => {
       throw new AppError("You are not enrolled in this course", 403);
     }
 
-    // ── deadline পার হয়েছে? ──
+    // Check deadline
     if (assignment.deadline && new Date() > assignment.deadline) {
       throw new AppError("Deadline has passed", 400);
     }
 
-    // ── আগেই জমা দিয়েছে কি? ──
+    // Prevent duplicate submission
     const existing = await prisma.assignmentSubmission.findFirst({
       where: { assignmentId, learnerId },
     });
@@ -315,152 +436,39 @@ assignmentRouter.post("/:id/submit", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৭. PATCH /submissions/:id/grade — অ্যাডমিন মার্ক দেবে
-//    URL: PATCH /api/v1/assignments/submissions/:id/grade
-//    Body: { marks, feedback? }
+// 10. GET /:id — Get a single assignment
+//     ⚠️ Must be LAST to avoid matching other routes
 // ═══════════════════════════════════════════════════════════
-assignmentRouter.patch(
-  "/submissions/:id/grade",
-  async (req, res, next) => {
-    try {
-      const id = req.params.id as string;
-      const { marks, feedback } = req.body;
-
-      if (marks === undefined || marks === null) {
-        throw new AppError("marks is required", 400);
-      }
-
-      const submission = await prisma.assignmentSubmission.findUnique({
-        where: { id },
-        include: {
-          assignment: {
-            select: { totalMarks: true, title: true },
-          },
-        },
-      });
-
-      if (!submission) {
-        throw new AppError("Submission not found", 404);
-      }
-
-      if (marks < 0 || marks > submission.assignment.totalMarks) {
-        throw new AppError(
-          `marks must be between 0 and ${submission.assignment.totalMarks}`,
-          400
-        );
-      }
-
-      const updated = await prisma.assignmentSubmission.update({
-        where: { id },
-        data: {
-          marks,
-          feedback: feedback ?? null,
-          status: "GRADED",
-          gradedAt: new Date(),
-        },
-      });
-
-      // ── ছাত্রকে notification ──
-      await prisma.notification.create({
-        data: {
-          userId: submission.learnerId,
-          type: "ANNOUNCEMENT",
-          title: "📊 অ্যাসাইনমেন্ট গ্রেড করা হয়েছে",
-          message: `${submission.assignment.title} — আপনি পেয়েছেন ${marks}/${submission.assignment.totalMarks}`,
-        },
-      });
-
-      sendResponse({
-        res,
-        message: "Submission graded successfully",
-        data: updated,
-      });
-    } catch (error) {
-      next(error);
-    }
-  }
-);
-
-// ═══════════════════════════════════════════════════════════
-// ৮. GET /:id/submissions — সব সাবমিশন (অ্যাডমিন)
-//    URL: GET /api/v1/assignments/:id/submissions
-// ═══════════════════════════════════════════════════════════
-assignmentRouter.get("/:id/submissions", async (req, res, next) => {
+assignmentRouter.get("/:id", async (req, res, next) => {
   try {
-    const assignmentId = req.params.id as string;
+    const id = req.params.id as string;
 
-    const submissions = await prisma.assignmentSubmission.findMany({
-      where: { assignmentId },
-      orderBy: { submittedAt: "desc" },
+    const assignment = await prisma.assignment.findUnique({
+      where: { id },
       include: {
-        learner: {
-          select: { id: true, name: true, email: true, avatar: true },
+        module: {
+          select: { id: true, title: true, courseId: true, batchId: true },
         },
-      },
-    });
-
-    sendResponse({
-      res,
-      message: "Submissions fetched successfully",
-      data: { submissions, total: submissions.length },
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// ═══════════════════════════════════════════════════════════
-// ৯. GET /my/:learnerId — আমার সব সাবমিশন
-//    URL: GET /api/v1/assignments/my/:learnerId
-// ═══════════════════════════════════════════════════════════
-assignmentRouter.get("/my/:learnerId", async (req, res, next) => {
-  try {
-    const learnerId = req.params.learnerId as string;
-
-    const submissions = await prisma.assignmentSubmission.findMany({
-      where: { learnerId },
-      orderBy: { submittedAt: "desc" },
-      include: {
-        assignment: {
-          select: {
-            id: true,
-            title: true,
-            totalMarks: true,
-            deadline: true,
-            module: {
-              select: { id: true, title: true, courseId: true },
+        submissions: {
+          orderBy: { submittedAt: "desc" },
+          include: {
+            learner: {
+              select: { id: true, name: true, email: true, avatar: true },
             },
           },
         },
       },
     });
 
+    if (!assignment || assignment.isDeleted) {
+      throw new AppError("Assignment not found", 404);
+    }
+
     sendResponse({
       res,
-      message: "My submissions fetched successfully",
-      data: { submissions, total: submissions.length },
+      message: "Assignment fetched successfully",
+      data: assignment,
     });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// ═══════════════════════════════════════════════════════════
-// ১০. DELETE /submissions/:id — সাবমিশন ডিলিট
-//     URL: DELETE /api/v1/assignments/submissions/:id
-// ═══════════════════════════════════════════════════════════
-assignmentRouter.delete("/submissions/:id", async (req, res, next) => {
-  try {
-    const id = req.params.id as string;
-
-    const exists = await prisma.assignmentSubmission.findUnique({
-      where: { id },
-    });
-    if (!exists) throw new AppError("Submission not found", 404);
-
-    await prisma.assignmentSubmission.delete({ where: { id } });
-
-    sendResponse({ res, message: "Submission deleted successfully" });
   } catch (error) {
     next(error);
   }

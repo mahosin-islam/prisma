@@ -2,9 +2,10 @@ import { Router } from "express";
 import { prisma } from "../lib/prisma.js";
 import { sendResponse } from "../utils/response.js";
 import { AppError } from "../utils/AppError.js";
+import { authMiddleware } from "../middlewares/auth.middleware.js";
 
 const lessonRouter = Router();
-
+lessonRouter.use(authMiddleware);
 // ═══════════════════════════════════════════════════════════
 // ১. POST / — নতুন লেসন তৈরি
 //    URL: POST /api/v1/lessons

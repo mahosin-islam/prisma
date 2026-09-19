@@ -2,99 +2,105 @@ import { Router } from "express";
 import { prisma } from "../lib/prisma.js";
 import { sendResponse } from "../utils/response.js";
 import { AppError } from "../utils/AppError.js";
+import { authMiddleware } from "../middlewares/auth.middleware.js";
+import { roleMiddleware } from "../middlewares/role.middleware.js";
 
 const liveSessionRouter = Router();
 
+liveSessionRouter.use(authMiddleware);
+
 // ═══════════════════════════════════════════════════════════
-// ১. POST / — নতুন লাইভ ক্লাস তৈরি (অ্যাডমিন)
-//    URL: POST /api/v1/live-sessions
+// 1. POST / — Create a new live session (ADMIN only)
 //    Body: { batchId, title, description?, meetingLink,
 //            scheduledAt, duration?, notifyStudents? }
 // ═══════════════════════════════════════════════════════════
-liveSessionRouter.post("/", async (req, res, next) => {
-  try {
-    const {
-      batchId,
-      title,
-      description,
-      meetingLink,
-      scheduledAt,
-      duration,
-      notifyStudents,
-    } = req.body;
-
-    if (!batchId || !title || !meetingLink || !scheduledAt) {
-      throw new AppError(
-        "batchId, title, meetingLink, scheduledAt are required",
-        400
-      );
-    }
-
-    // ── Batch আছে কি? ──
-    const batch = await prisma.batch.findUnique({
-      where: { id: batchId },
-      include: { course: true },
-    });
-
-    if (!batch || batch.isDeleted) {
-      throw new AppError("Batch not found", 404);
-    }
-
-    // ── Create ──
-    const session = await prisma.liveSession.create({
-      data: {
+liveSessionRouter.post(
+  "/",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const {
         batchId,
         title,
-        description: description ?? null,
+        description,
         meetingLink,
-        scheduledAt: new Date(scheduledAt),
-        duration: duration ?? 60,
-      },
-      include: {
-        batch: {
-          select: { id: true, batchNumber: true, title: true },
-        },
-      },
-    });
+        scheduledAt,
+        duration,
+        notifyStudents,
+      } = req.body;
 
-    // ── Notification পাঠাও ──
-    if (notifyStudents) {
-      const enrollments = await prisma.enrollment.findMany({
-        where: { batchId, status: "ACTIVE", isDeleted: false },
-        select: { learnerId: true },
+      if (!batchId || !title || !meetingLink || !scheduledAt) {
+        throw new AppError(
+          "batchId, title, meetingLink, scheduledAt are required",
+          400
+        );
+      }
+
+      // Check if batch exists
+      const batch = await prisma.batch.findUnique({
+        where: { id: batchId },
+        include: { course: true },
       });
 
-      if (enrollments.length > 0) {
-        await prisma.notification.createMany({
-          data: enrollments.map((e) => ({
-            userId: e.learnerId,
-            batchId,
-            type: "NEW_LIVE_CLASS",
-            title: "🎥 নতুন লাইভ ক্লাস",
-            message: `${title} — ${new Date(scheduledAt).toLocaleString()}`,
-            link: `/live-sessions/${session.id}`,
-          })),
-        });
+      if (!batch || batch.isDeleted) {
+        throw new AppError("Batch not found", 404);
       }
-    }
 
-    sendResponse({
-      res,
-      statusCode: 201,
-      message: notifyStudents
-        ? "Live session created and students notified"
-        : "Live session created successfully",
-      data: session,
-    });
-  } catch (error) {
-    next(error);
+      // Create live session
+      const session = await prisma.liveSession.create({
+        data: {
+          batchId,
+          title,
+          description: description ?? null,
+          meetingLink,
+          scheduledAt: new Date(scheduledAt),
+          duration: duration ?? 60,
+        },
+        include: {
+          batch: {
+            select: { id: true, batchNumber: true, title: true },
+          },
+        },
+      });
+
+      // Send notifications to enrolled students
+      if (notifyStudents) {
+        const enrollments = await prisma.enrollment.findMany({
+          where: { batchId, status: "ACTIVE", isDeleted: false },
+          select: { learnerId: true },
+        });
+
+        if (enrollments.length > 0) {
+          await prisma.notification.createMany({
+            data: enrollments.map((e) => ({
+              userId: e.learnerId,
+              batchId,
+              type: "NEW_LIVE_CLASS",
+              title: "New Live Class",
+              message: `${title} — ${new Date(scheduledAt).toLocaleString()}`,
+              link: `/live-sessions/${session.id}`,
+            })),
+          });
+        }
+      }
+
+      sendResponse({
+        res,
+        statusCode: 201,
+        message: notifyStudents
+          ? "Live session created and students notified"
+          : "Live session created successfully",
+        data: session,
+      });
+    } catch (error) {
+      next(error);
+    }
   }
-});
+);
 
 // ═══════════════════════════════════════════════════════════
-// ২. GET /batch/:batchId — একটা ব্যাচের সব লাইভ ক্লাস
-//    URL: GET /api/v1/live-sessions/batch/:batchId
-//    Query: ?upcoming=true (শুধু আগামী)
+// 2. GET /batch/:batchId — Get all live sessions of a batch
+//    Query: ?upcoming=true (only future sessions)
 // ═══════════════════════════════════════════════════════════
 liveSessionRouter.get("/batch/:batchId", async (req, res, next) => {
   try {
@@ -121,15 +127,19 @@ liveSessionRouter.get("/batch/:batchId", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৩. GET /my/:learnerId — ছাত্রের সব লাইভ ক্লাস
-//    URL: GET /api/v1/live-sessions/my/:learnerId
+// 3. GET /my/:learnerId — Get all live sessions for a learner
 // ═══════════════════════════════════════════════════════════
 liveSessionRouter.get("/my/:learnerId", async (req, res, next) => {
   try {
     const learnerId = req.params.learnerId as string;
 
     const enrollments = await prisma.enrollment.findMany({
-      where: { learnerId, status: "ACTIVE", isDeleted: false, batchId: { not: null } },
+      where: {
+        learnerId,
+        status: "ACTIVE",
+        isDeleted: false,
+        batchId: { not: null },
+      },
       select: { batchId: true },
     });
 
@@ -162,8 +172,7 @@ liveSessionRouter.get("/my/:learnerId", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৪. GET /:id — একটা সেশন দেখা
-//    URL: GET /api/v1/live-sessions/:id
+// 4. GET /:id — Get a single live session
 // ═══════════════════════════════════════════════════════════
 liveSessionRouter.get("/:id", async (req, res, next) => {
   try {
@@ -187,7 +196,7 @@ liveSessionRouter.get("/:id", async (req, res, next) => {
       throw new AppError("Live session not found", 404);
     }
 
-    // ── সময় হয়ে গেছে কি? ──
+    // Compute session status based on schedule
     const now = new Date();
     const sessionEnd = new Date(
       session.scheduledAt.getTime() + session.duration * 60 * 1000
@@ -195,7 +204,6 @@ liveSessionRouter.get("/:id", async (req, res, next) => {
 
     const isLive = now >= session.scheduledAt && now <= sessionEnd;
     const isUpcoming = now < session.scheduledAt;
-    const isPast = now > sessionEnd;
 
     sendResponse({
       res,
@@ -211,65 +219,72 @@ liveSessionRouter.get("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৫. PATCH /:id — সেশন আপডেট (অ্যাডমিন)
-//    URL: PATCH /api/v1/live-sessions/:id
+// 5. PATCH /:id — Update a live session (ADMIN only)
 // ═══════════════════════════════════════════════════════════
-liveSessionRouter.patch("/:id", async (req, res, next) => {
-  try {
-    const id = req.params.id as string;
-    const { title, description, meetingLink, scheduledAt, duration } = req.body;
+liveSessionRouter.patch(
+  "/:id",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const id = req.params.id as string;
+      const { title, description, meetingLink, scheduledAt, duration } =
+        req.body;
 
-    const exists = await prisma.liveSession.findUnique({ where: { id } });
-    if (!exists || exists.isDeleted) {
-      throw new AppError("Live session not found", 404);
+      const exists = await prisma.liveSession.findUnique({ where: { id } });
+      if (!exists || exists.isDeleted) {
+        throw new AppError("Live session not found", 404);
+      }
+
+      const session = await prisma.liveSession.update({
+        where: { id },
+        data: {
+          ...(title && { title }),
+          ...(description !== undefined && { description }),
+          ...(meetingLink && { meetingLink }),
+          ...(scheduledAt && { scheduledAt: new Date(scheduledAt) }),
+          ...(duration !== undefined && { duration }),
+        },
+        include: {
+          batch: { select: { id: true, batchNumber: true, title: true } },
+        },
+      });
+
+      sendResponse({
+        res,
+        message: "Live session updated successfully",
+        data: session,
+      });
+    } catch (error) {
+      next(error);
     }
-
-    const session = await prisma.liveSession.update({
-      where: { id },
-      data: {
-        ...(title && { title }),
-        ...(description !== undefined && { description }),
-        ...(meetingLink && { meetingLink }),
-        ...(scheduledAt && { scheduledAt: new Date(scheduledAt) }),
-        ...(duration !== undefined && { duration }),
-      },
-      include: {
-        batch: { select: { id: true, batchNumber: true, title: true } },
-      },
-    });
-
-    sendResponse({
-      res,
-      message: "Live session updated successfully",
-      data: session,
-    });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
 // ═══════════════════════════════════════════════════════════
-// ৬. DELETE /:id — সেশন ডিলিট (সফট)
-//    URL: DELETE /api/v1/live-sessions/:id
+// 6. DELETE /:id — Soft delete a live session (ADMIN only)
 // ═══════════════════════════════════════════════════════════
-liveSessionRouter.delete("/:id", async (req, res, next) => {
-  try {
-    const id = req.params.id as string;
+liveSessionRouter.delete(
+  "/:id",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const id = req.params.id as string;
 
-    const exists = await prisma.liveSession.findUnique({ where: { id } });
-    if (!exists || exists.isDeleted) {
-      throw new AppError("Live session not found", 404);
+      const exists = await prisma.liveSession.findUnique({ where: { id } });
+      if (!exists || exists.isDeleted) {
+        throw new AppError("Live session not found", 404);
+      }
+
+      await prisma.liveSession.update({
+        where: { id },
+        data: { isDeleted: true },
+      });
+
+      sendResponse({ res, message: "Live session deleted successfully" });
+    } catch (error) {
+      next(error);
     }
-
-    await prisma.liveSession.update({
-      where: { id },
-      data: { isDeleted: true },
-    });
-
-    sendResponse({ res, message: "Live session deleted successfully" });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
 export default liveSessionRouter;
