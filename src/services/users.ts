@@ -1,101 +1,145 @@
 import { Router } from "express";
 import { prisma } from "../lib/prisma.js";
+import { sendResponse } from "../utils/response.js";
+import { AppError } from "../utils/AppError.js";
 
 const userRouter = Router();
 
-// ১. Create User (POST)
-userRouter.post("/", async (req, res) => {
+// ⚠️ আপাতত টোকেন/রোল চেক বন্ধ — পরে ফ্রন্টএন্ডের সময় যোগ করব
+
+// ═══════════════════════════════════════════════════════════
+// ১. GET / — সব ইউজার দেখা
+//    URL: GET /api/v1/users?search=mahosin&role=LEARNER
+// ═══════════════════════════════════════════════════════════
+userRouter.get("/", async (req, res, next) => {
   try {
-    const userData = req.body;
-    const result = await prisma.user.create({
-      data: userData,
+    const search = req.query.search as string | undefined;
+    const role = req.query.role as string | undefined;
+
+    const where = {
+      isDeleted: false,
+      ...(search && {
+        OR: [
+          { name: { contains: search, mode: "insensitive" as const } },
+          { email: { contains: search, mode: "insensitive" as const } },
+        ],
+      }),
+      ...(role && { role: role as "ADMIN" | "LEARNER" }),
+    };
+
+    const users = await prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        avatar: true,
+        bio: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "desc" },
     });
-    res.status(201).json({
-      success: true,
-      message: "User created successfully",
-      data: result,
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Error creating user" });
-  }
-});
 
-
-
-
-// ২. Get All Users (GET)
-userRouter.get("/", async (req, res) => {
-  try {
-    const users = await prisma.user.findMany();
-    res.status(200).json({
-      success: true,
+    sendResponse({
+      res,
       message: "Users fetched successfully",
-      data: users,
+      data: { users, total: users.length },
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Error fetching users" });
+    next(error);
   }
 });
 
-// ৩. Get Single User (GET)
-userRouter.get("/:id", async (req, res) => {
+// ═══════════════════════════════════════════════════════════
+// ২. GET /:id — একজন ইউজার দেখা
+//    URL: GET /api/v1/users/:id
+// ═══════════════════════════════════════════════════════════
+userRouter.get("/:id", async (req, res, next) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
+
     const user = await prisma.user.findUnique({
-      where: { id: String(id) }, // id যদি UUID (String) হয়, তবে শুধু id দিন
+      where: { id },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        avatar: true,
+        bio: true,
+        createdAt: true,
+      },
     });
 
-    if (!user) {
-      res.status(404).json({ success: false, message: "User not found" });
-      return;
+    if (!user) throw new AppError("User not found", 404);
+
+    sendResponse({ res, message: "User fetched", data: user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// ৩. PATCH /:id — ইউজার আপডেট
+//    URL: PATCH /api/v1/users/:id
+//    Body: { name?, avatar?, bio?, role? }
+// ═══════════════════════════════════════════════════════════
+userRouter.patch("/:id", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const { name, avatar, bio, role } = req.body;
+
+    const exists = await prisma.user.findUnique({ where: { id } });
+    if (!exists || exists.isDeleted) {
+      throw new AppError("User not found", 404);
     }
 
-    res.status(200).json({
-      success: true,
-      message: "User fetched successfully",
-      data: user,
+    const user = await prisma.user.update({
+      where: { id },
+      data: {
+        ...(name && { name }),
+        ...(avatar !== undefined && { avatar }),
+        ...(bio !== undefined && { bio }),
+        ...(role && { role }),
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        avatar: true,
+        bio: true,
+        updatedAt: true,
+      },
     });
+
+    sendResponse({ res, message: "User updated", data: user });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Error fetching user" });
+    next(error);
   }
 });
 
-// ৪. Update User (PUT / PATCH)
-userRouter.put("/:id", async (req, res) => {
+// ═══════════════════════════════════════════════════════════
+// ৪. DELETE /:id — সফট ডিলিট
+//    URL: DELETE /api/v1/users/:id
+// ═══════════════════════════════════════════════════════════
+userRouter.delete("/:id", async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const updateData = req.body;
+    const id = req.params.id as string;
 
-    const result = await prisma.user.update({
-      where: { id: String(id) },
-      data: updateData,
-    });
-
-    res.status(200).json({
-      success: true,
-      message: "User updated successfully",
-      data: result,
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Error updating user" });
-  }
-});
-
-// ৫. Delete User (DELETE)
-userRouter.delete("/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
+    const exists = await prisma.user.findUnique({ where: { id } });
+    if (!exists || exists.isDeleted) {
+      throw new AppError("User not found", 404);
+    }
 
     await prisma.user.delete({
-      where: { id: String(id) },
+      where: { id }
     });
 
-    res.status(200).json({
-      success: true,
-      message: "User deleted successfully",
-    });
+    sendResponse({ res, message: "User deleted successfully" });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Error deleting user" });
+    next(error);
   }
 });
 

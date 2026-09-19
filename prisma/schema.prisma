@@ -6,28 +6,482 @@ datasource db {
   provider = "postgresql"
 }
 
-model User{
-  id String @id @default(uuid())
-  name String 
-  email String @unique
-  password String
-  role UserRole @default(User)
-  avatar String?
+// ═══════════════════════════════════════════════════════════
+//                        ENUMS
+// ═══════════════════════════════════════════════════════════
+
+enum UserRole {
+  ADMIN
+  LEARNER
+}
+
+enum CourseType {
+  FIXED
+  BATCH
+}
+
+enum CourseStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum CourseLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum BatchStatus {
+  UPCOMING
+  ACTIVE
+  COMPLETED
+}
+
+enum LessonType {
+  VIDEO
+  TEXT
+  QUIZ
+}
+
+enum EnrollmentStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PaymentProvider {
+  BKASH
+  NAGAD
+  FREE
+}
+
+enum NotificationType {
+  NEW_LESSON
+  NEW_ASSIGNMENT
+  NEW_LIVE_CLASS
+  ANNOUNCEMENT
+  COURSE_COMPLETED
+}
+
+enum AssignmentStatus {
+  PENDING
+  SUBMITTED
+  GRADED
+}
+
+// ═══════════════════════════════════════════════════════════
+//                        USER
+// ═══════════════════════════════════════════════════════════
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  role      UserRole @default(LEARNER)
+  avatar    String?
+  bio       String?
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  coursesCreated        Course[]               @relation("AdminCourses")
+  enrollments           Enrollment[]
+  lessonProgress        LessonProgress[]
+  quizAttempts          QuizAttempt[]
+  orders                Order[]
+  reviews               Review[]
+  notifications         Notification[]
+  assignmentSubmissions AssignmentSubmission[]
+  certificates          Certificate[]
+
   @@map("users")
 }
-enum UserRole{
-  User
-  Admin
-  Manager
+
+// ═══════════════════════════════════════════════════════════
+//                        COURSE
+// ═══════════════════════════════════════════════════════════
+
+model Course {
+  id          String       @id @default(uuid())
+  title       String
+  slug        String       @unique
+  description String
+  thumbnail   String?
+  price       Float        @default(0)
+  level       CourseLevel  @default(BEGINNER)
+  courseType  CourseType   @default(FIXED)
+  status      CourseStatus @default(DRAFT)
+  adminId     String
+  isDeleted   Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  admin        User          @relation("AdminCourses", fields: [adminId], references: [id])
+  batches      Batch[]
+  modules      Module[]
+  enrollments  Enrollment[]
+  orders       Order[]
+  reviews      Review[]
+  certificates Certificate[]
+
+  @@index([adminId])
+  @@map("courses")
 }
 
-model Product {
-  id    String @id @default(uuid())
-  name  String
+// ═══════════════════════════════════════════════════════════
+//                        BATCH
+// ═══════════════════════════════════════════════════════════
+
+model Batch {
+  id          String      @id @default(uuid())
+  courseId    String
+  batchNumber Int
+  title       String?
+  startDate   DateTime
+  endDate     DateTime
+  status      BatchStatus @default(UPCOMING)
+  isDeleted   Boolean     @default(false)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  course        Course         @relation(fields: [courseId], references: [id])
+  modules       Module[]
+  enrollments   Enrollment[]
+  orders        Order[]
+  liveSessions  LiveSession[]
+  notifications Notification[]
+  certificates  Certificate[]
+
+  @@unique([courseId, batchNumber])
+  @@index([courseId])
+  @@map("batches")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                        MODULE
+// ═══════════════════════════════════════════════════════════
+
+model Module {
+  id        String   @id @default(uuid())
+  courseId  String
+  batchId   String?
+  title     String
+  intro     String?
+  order     Int
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  course      Course       @relation(fields: [courseId], references: [id])
+  batch       Batch?       @relation(fields: [batchId], references: [id])
+  lessons     Lesson[]
+  assignments Assignment[]
+
+  @@index([courseId])
+  @@index([batchId])
+  @@map("modules")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                        LESSON
+// ═══════════════════════════════════════════════════════════
+
+model Lesson {
+  id          String     @id @default(uuid())
+  moduleId    String
+  title       String
   description String?
-  price Float
-  stock Int
-  @@map("products")
+  type        LessonType @default(VIDEO)
+  content     String?
+  videoId     String?
+  videoUrl    String?
+  provider    String?    @default("youtube")
+  duration    Int?
+  thumbnail   String?
+  order       Int
+  isFree      Boolean    @default(false)
+  isPublished Boolean    @default(false)
+  availableAt DateTime?
+  isDeleted   Boolean    @default(false)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  module         Module           @relation(fields: [moduleId], references: [id])
+  quizzes        Quiz[]
+  lessonProgress LessonProgress[]
+
+  @@index([moduleId])
+  @@map("lessons")
 }
 
+// ═══════════════════════════════════════════════════════════
+//                        QUIZ
+// ═══════════════════════════════════════════════════════════
 
+model Quiz {
+  id            String   @id @default(uuid())
+  lessonId      String
+  question      String
+  options       Json
+  correctAnswer String
+  order         Int
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  lesson       Lesson        @relation(fields: [lessonId], references: [id])
+  quizAttempts QuizAttempt[]
+
+  @@index([lessonId])
+  @@map("quizzes")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                        ENROLLMENT
+// ═══════════════════════════════════════════════════════════
+
+model Enrollment {
+  id          String           @id @default(uuid())
+  learnerId   String
+  courseId    String
+  batchId     String?
+  status      EnrollmentStatus @default(PENDING)
+  progress    Int              @default(0)
+  enrolledAt  DateTime         @default(now())
+  completedAt DateTime?
+  isDeleted   Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  learner User   @relation(fields: [learnerId], references: [id])
+  course  Course @relation(fields: [courseId], references: [id])
+  batch   Batch? @relation(fields: [batchId], references: [id])
+
+  @@unique([learnerId, courseId, batchId])
+  @@index([learnerId])
+  @@index([courseId])
+  @@index([batchId])
+  @@map("enrollments")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                    LESSON PROGRESS
+// ═══════════════════════════════════════════════════════════
+
+model LessonProgress {
+  id          String    @id @default(uuid())
+  learnerId   String
+  lessonId    String
+  isCompleted Boolean   @default(false)
+  isUnlocked  Boolean   @default(false)
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  learner User   @relation(fields: [learnerId], references: [id])
+  lesson  Lesson @relation(fields: [lessonId], references: [id])
+
+  @@unique([learnerId, lessonId])
+  @@index([learnerId])
+  @@index([lessonId])
+  @@map("lesson_progress")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                    QUIZ ATTEMPT
+// ═══════════════════════════════════════════════════════════
+
+model QuizAttempt {
+  id             String   @id @default(uuid())
+  learnerId      String
+  quizId         String
+  selectedAnswer String
+  isCorrect      Boolean
+  createdAt      DateTime @default(now())
+
+  learner User @relation(fields: [learnerId], references: [id])
+  quiz    Quiz @relation(fields: [quizId], references: [id])
+
+  @@index([learnerId])
+  @@index([quizId])
+  @@map("quiz_attempts")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                        ORDER
+// ═══════════════════════════════════════════════════════════
+
+model Order {
+  id            String          @id @default(uuid())
+  learnerId     String
+  courseId      String
+  batchId       String?
+  amount        Float
+  provider      PaymentProvider @default(FREE)
+  senderNumber  String?
+  transactionId String?
+  status        PaymentStatus   @default(PENDING)
+  isDeleted     Boolean         @default(false)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  learner User   @relation(fields: [learnerId], references: [id])
+  course  Course @relation(fields: [courseId], references: [id])
+  batch   Batch? @relation(fields: [batchId], references: [id])
+
+  @@index([learnerId])
+  @@index([courseId])
+  @@index([batchId])
+  @@map("orders")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                        REVIEW
+// ═══════════════════════════════════════════════════════════
+
+model Review {
+  id        String   @id @default(uuid())
+  learnerId String
+  courseId  String
+  rating    Int
+  comment   String?
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  learner User   @relation(fields: [learnerId], references: [id])
+  course  Course @relation(fields: [courseId], references: [id])
+
+  @@index([learnerId])
+  @@index([courseId])
+  @@map("reviews")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                        LIVE SESSION
+// ═══════════════════════════════════════════════════════════
+
+model LiveSession {
+  id          String   @id @default(uuid())
+  batchId     String
+  title       String
+  description String?
+  meetingLink String
+  scheduledAt DateTime
+  duration    Int      @default(60)
+  isDeleted   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  batch Batch @relation(fields: [batchId], references: [id])
+
+  @@index([batchId])
+  @@index([scheduledAt])
+  @@map("live_sessions")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                    NOTIFICATION
+// ═══════════════════════════════════════════════════════════
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  batchId   String?
+  type      NotificationType
+  title     String
+  message   String
+  link      String?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user  User   @relation(fields: [userId], references: [id])
+  batch Batch? @relation(fields: [batchId], references: [id])
+
+  @@index([userId, isRead])
+  @@index([batchId])
+  @@map("notifications")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                    ASSIGNMENT
+// ═══════════════════════════════════════════════════════════
+
+model Assignment {
+  id          String    @id @default(uuid())
+  moduleId    String
+  title       String
+  description String?
+  docUrl      String?
+  deadline    DateTime?
+  totalMarks  Int       @default(100)
+  isDeleted   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  module      Module                 @relation(fields: [moduleId], references: [id])
+  submissions AssignmentSubmission[]
+
+  @@index([moduleId])
+  @@map("assignments")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                ASSIGNMENT SUBMISSION
+// ═══════════════════════════════════════════════════════════
+
+model AssignmentSubmission {
+  id           String           @id @default(uuid())
+  assignmentId String
+  learnerId    String
+  answerUrl    String
+  note         String?
+  status       AssignmentStatus @default(SUBMITTED)
+  marks        Int?
+  feedback     String?
+  submittedAt  DateTime         @default(now())
+  gradedAt     DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id])
+  learner    User       @relation(fields: [learnerId], references: [id])
+
+  @@unique([assignmentId, learnerId])
+  @@index([assignmentId])
+  @@index([learnerId])
+  @@map("assignment_submissions")
+}
+
+// ═══════════════════════════════════════════════════════════
+//                    CERTIFICATE
+// ═══════════════════════════════════════════════════════════
+
+model Certificate {
+  id              String   @id @default(uuid())
+  certificateCode String   @unique
+  learnerId       String
+  courseId        String
+  batchId         String?
+  learnerName     String
+  courseName      String
+  batchName       String?
+  issuedAt        DateTime @default(now())
+
+  learner User   @relation(fields: [learnerId], references: [id])
+  course  Course @relation(fields: [courseId], references: [id])
+  batch   Batch? @relation(fields: [batchId], references: [id])
+
+  @@index([learnerId])
+  @@index([courseId])
+  @@map("certificates")
+}
