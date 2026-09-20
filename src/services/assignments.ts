@@ -66,7 +66,7 @@ assignmentRouter.post(
           enrollments = await prisma.enrollment.findMany({
             where: {
               batchId: moduleData.batchId,
-              status: "ACTIVE",
+              status: { in: ["ACTIVE", "COMPLETED"] },   // ✅ FIXED
               isDeleted: false,
             },
             select: { learnerId: true },
@@ -75,7 +75,7 @@ assignmentRouter.post(
           enrollments = await prisma.enrollment.findMany({
             where: {
               courseId: moduleData.courseId,
-              status: "ACTIVE",
+              status: { in: ["ACTIVE", "COMPLETED"] },   // ✅ FIXED
               isDeleted: false,
             },
             select: { learnerId: true },
@@ -378,7 +378,7 @@ assignmentRouter.post("/:id/submit", async (req, res, next) => {
       throw new AppError("Assignment not found", 404);
     }
 
-    // Check enrollment
+    // Check enrollment — allow ACTIVE and COMPLETED
     const enrollment = await prisma.enrollment.findFirst({
       where: {
         learnerId,
@@ -386,7 +386,7 @@ assignmentRouter.post("/:id/submit", async (req, res, next) => {
         ...(assignment.module.batchId && {
           batchId: assignment.module.batchId,
         }),
-        status: "ACTIVE",
+        status: { in: ["ACTIVE", "COMPLETED"] },   // ✅ FIXED
         isDeleted: false,
       },
     });
