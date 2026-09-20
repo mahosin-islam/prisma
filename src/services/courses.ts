@@ -121,6 +121,7 @@ courseRouter.get("/", async (req, res, next) => {
             startDate: true,
             endDate: true,
             status: true,
+            certificateUnlocked: true,   // 🆕
           },
           orderBy: { batchNumber: "asc" },
         },
@@ -160,11 +161,9 @@ courseRouter.get("/:id", async (req, res, next) => {
     let isAdmin = false;
     let hasEnrollment = false;
 
-    // Try to read the token from headers manually (optional)
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith("Bearer ")) {
       try {
-        // Import verifyToken inline to avoid circular deps
         const { verifyToken } = await import("../utils/jwt.js");
         const token = authHeader.split(" ")[1];
         if (token) {
@@ -264,7 +263,6 @@ courseRouter.get("/:id", async (req, res, next) => {
         if (canSeeFullContent || lesson.isFree) {
           return lesson;
         }
-        // Hide content fields for non-free lessons
         return {
           ...lesson,
           videoId: null,
@@ -274,12 +272,19 @@ courseRouter.get("/:id", async (req, res, next) => {
       }),
     }));
 
+    // Sanitize batches — ensure certificateUnlocked is included
+    const sanitizedBatches = course.batches.map((batch) => ({
+      ...batch,
+      certificateUnlocked: (batch as any).certificateUnlocked ?? false,
+    }));
+
     sendResponse({
       res,
       message: "Course fetched successfully",
       data: {
         ...course,
         modules: sanitizedModules,
+        batches: sanitizedBatches,
       },
     });
   } catch (error) {

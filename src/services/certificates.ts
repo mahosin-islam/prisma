@@ -56,6 +56,13 @@ certificateRouter.use(authMiddleware);
 // ═══════════════════════════════════════════════════════════
 // 1. POST /generate — Generate certificate after course completion
 //    Body: { learnerId, courseId, batchId? }
+//
+//    Rules:
+//    - Only the learner themselves or an ADMIN
+//    - Must be enrolled
+//    - Progress must be 100%
+//    - For BATCH courses: batch.certificateUnlocked must be true
+//    - Certificate must not already exist
 // ═══════════════════════════════════════════════════════════
 certificateRouter.post("/generate", async (req, res, next) => {
   try {
@@ -106,6 +113,20 @@ certificateRouter.post("/generate", async (req, res, next) => {
       );
     }
 
+    // 🆕 For BATCH courses: require admin to unlock the batch first
+    if (batchId && enrollment.batch) {
+      const batch = await prisma.batch.findUnique({
+        where: { id: batchId },
+      });
+
+      if (!batch || !batch.certificateUnlocked) {
+        throw new AppError(
+          "Certificate is not yet available for this batch. Please wait until your instructor marks the batch as complete.",
+          400
+        );
+      }
+    }
+
     const certificate = await prisma.certificate.create({
       data: {
         certificateCode: generateCertificateCode(),
@@ -135,7 +156,7 @@ certificateRouter.post("/generate", async (req, res, next) => {
         type: "COURSE_COMPLETED",
         title: "Certificate Issued",
         message: `Congratulations on completing ${enrollment.course.title}!`,
-        link: `/certificates/${certificate.id}`,
+        link: `/learner/certificates`,
       },
     });
 
@@ -156,6 +177,11 @@ certificateRouter.post("/generate", async (req, res, next) => {
 certificateRouter.get("/my/:learnerId", async (req, res, next) => {
   try {
     const learnerId = req.params.learnerId as string;
+
+    // Only self or ADMIN
+    if (req.user!.userId !== learnerId && req.user!.role !== "ADMIN") {
+      throw new AppError("You can only view your own certificates", 403);
+    }
 
     const certificates = await prisma.certificate.findMany({
       where: { learnerId },
@@ -228,6 +254,14 @@ certificateRouter.get("/:id", async (req, res, next) => {
 
     if (!certificate) {
       throw new AppError("Certificate not found", 404);
+    }
+
+    // Only the certificate owner or ADMIN
+    if (
+      req.user!.userId !== certificate.learnerId &&
+      req.user!.role !== "ADMIN"
+    ) {
+      throw new AppError("You can only view your own certificate", 403);
     }
 
     sendResponse({

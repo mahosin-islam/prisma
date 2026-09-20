@@ -144,6 +144,7 @@ model Course {
 
 model Batch {
   id          String      @id @default(uuid())
+  certificateUnlocked Boolean @default(false) 
   courseId    String
   batchNumber Int
   title       String?

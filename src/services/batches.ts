@@ -8,8 +8,7 @@ import { roleMiddleware } from "../middlewares/role.middleware.js";
 const batchRouter = Router();
 
 // ═══════════════════════════════════════════════════════════
-// ১. POST / — নতুন ব্যাচ তৈরি (শুধু ADMIN)
-//    URL: POST /api/v1/batches
+// 1. POST / — Create a new batch (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 batchRouter.post(
   "/",
@@ -87,8 +86,7 @@ batchRouter.post(
 );
 
 // ═══════════════════════════════════════════════════════════
-// ২. GET /course/:courseId — কোর্সের সব ব্যাচ (পাবলিক)
-//    URL: GET /api/v1/batches/course/:courseId
+// 2. GET /course/:courseId — Get all batches of a course (PUBLIC)
 // ═══════════════════════════════════════════════════════════
 batchRouter.get("/course/:courseId", async (req, res, next) => {
   try {
@@ -119,8 +117,79 @@ batchRouter.get("/course/:courseId", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৩. GET /:id — একটা ব্যাচ (পাবলিক)
-//    URL: GET /api/v1/batches/:id
+// 3. PATCH /:id/unlock-certificate — Unlock certificate for batch (ADMIN only)
+//    ⚠️ MUST come BEFORE PATCH /:id to avoid conflicts
+//    Sets certificateUnlocked = true. Learners can only generate
+//    certificates after this.
+// ═══════════════════════════════════════════════════════════
+batchRouter.patch(
+  "/:id/unlock-certificate",
+  authMiddleware,
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const id = req.params.id as string;
+
+      const batch = await prisma.batch.findUnique({
+        where: { id },
+        include: {
+          course: { select: { id: true, title: true } },
+        },
+      });
+
+      if (!batch || batch.isDeleted) {
+        throw new AppError("Batch not found", 404);
+      }
+
+      if (batch.certificateUnlocked) {
+        return sendResponse({
+          res,
+          message: "Certificate is already unlocked for this batch",
+          data: batch,
+        });
+      }
+
+      const updated = await prisma.batch.update({
+        where: { id },
+        data: { certificateUnlocked: true },
+      });
+
+      // Notify enrolled learners
+      const enrollments = await prisma.enrollment.findMany({
+        where: {
+          batchId: id,
+          status: { in: ["ACTIVE", "COMPLETED"] },
+          isDeleted: false,
+        },
+        select: { learnerId: true },
+      });
+
+      if (enrollments.length > 0) {
+        await prisma.notification.createMany({
+          data: enrollments.map((e) => ({
+            userId: e.learnerId,
+            batchId: id,
+            type: "COURSE_COMPLETED",
+            title: "🎓 Certificate Available",
+            message: `Your certificate for ${batch.course.title} is now available!`,
+            link: "/learner/certificates",
+          })),
+        });
+      }
+
+      sendResponse({
+        res,
+        message: `Certificate unlocked for Batch ${batch.batchNumber}. ${enrollments.length} learners notified.`,
+        data: updated,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════
+// 4. GET /:id — Get a single batch (PUBLIC)
 // ═══════════════════════════════════════════════════════════
 batchRouter.get("/:id", async (req, res, next) => {
   try {
@@ -197,8 +266,7 @@ batchRouter.get("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৪. PATCH /:id — ব্যাচ আপডেট (শুধু ADMIN)
-//    URL: PATCH /api/v1/batches/:id
+// 5. PATCH /:id — Update a batch (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 batchRouter.patch(
   "/:id",
@@ -241,8 +309,7 @@ batchRouter.patch(
 );
 
 // ═══════════════════════════════════════════════════════════
-// ৫. PATCH /:id/activate — ব্যাচ সক্রিয় (শুধু ADMIN)
-//    URL: PATCH /api/v1/batches/:id/activate
+// 6. PATCH /:id/activate — Activate batch (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 batchRouter.patch(
   "/:id/activate",
@@ -283,8 +350,7 @@ batchRouter.patch(
 );
 
 // ═══════════════════════════════════════════════════════════
-// ৬. DELETE /:id — সফট ডিলিট (শুধু ADMIN)
-//    URL: DELETE /api/v1/batches/:id
+// 7. DELETE /:id — Soft delete a batch (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 batchRouter.delete(
   "/:id",
