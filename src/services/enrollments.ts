@@ -17,6 +17,22 @@ enrollmentRouter.post("/", async (req, res, next) => {
   try {
     const { learnerId, courseId, batchId } = req.body;
 
+    const currentUserId = req.user!.userId;
+    const currentUserRole = req.user!.role;
+
+    // Admins cannot enroll
+    if (currentUserRole === "ADMIN") {
+      throw new AppError(
+        "Admins cannot enroll in courses. Please use a learner account.",
+        403
+      );
+    }
+
+    // Learner can only enroll themselves
+    if (learnerId !== currentUserId) {
+      throw new AppError("You can only enroll yourself", 403);
+    }
+
     if (!learnerId || !courseId) {
       throw new AppError("learnerId and courseId are required", 400);
     }
@@ -132,6 +148,12 @@ enrollmentRouter.post("/", async (req, res, next) => {
     next(error);
   }
 });
+
+
+
+
+
+
 
 // ═══════════════════════════════════════════════════════════
 // 2. GET /my/:learnerId — Get all enrollments for a learner
