@@ -7,8 +7,6 @@ import { roleMiddleware } from "../middlewares/role.middleware.js";
 
 const certificateRouter = Router();
 
-certificateRouter.use(authMiddleware);
-
 // ═══════════════════════════════════════════════════════════
 // Helper: Generate a unique certificate code
 // ═══════════════════════════════════════════════════════════
@@ -20,9 +18,44 @@ function generateCertificateCode(): string {
 }
 
 // ═══════════════════════════════════════════════════════════
+// PUBLIC ROUTE — Verify a certificate (no auth required)
+// ⚠️ MUST be before authMiddleware
+// ═══════════════════════════════════════════════════════════
+certificateRouter.get("/verify/:code", async (req, res, next) => {
+  try {
+    const code = req.params.code as string;
+
+    const certificate = await prisma.certificate.findUnique({
+      where: { certificateCode: code },
+      include: {
+        learner: { select: { id: true, name: true } },
+        course: { select: { id: true, title: true, slug: true } },
+        batch: { select: { id: true, batchNumber: true, title: true } },
+      },
+    });
+
+    if (!certificate) {
+      throw new AppError("Invalid certificate code", 404);
+    }
+
+    sendResponse({
+      res,
+      message: "Certificate verified successfully",
+      data: { isValid: true, certificate },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// ALL ROUTES BELOW REQUIRE AUTHENTICATION
+// ═══════════════════════════════════════════════════════════
+certificateRouter.use(authMiddleware);
+
+// ═══════════════════════════════════════════════════════════
 // 1. POST /generate — Generate certificate after course completion
 //    Body: { learnerId, courseId, batchId? }
-//    ⚠️ Only the learner themselves or an ADMIN can generate
 // ═══════════════════════════════════════════════════════════
 certificateRouter.post("/generate", async (req, res, next) => {
   try {
@@ -32,15 +65,10 @@ certificateRouter.post("/generate", async (req, res, next) => {
       throw new AppError("learnerId and courseId are required", 400);
     }
 
-    // Only the learner or an ADMIN can generate a certificate
     if (req.user!.userId !== learnerId && req.user!.role !== "ADMIN") {
-      throw new AppError(
-        "You can only generate your own certificate",
-        403
-      );
+      throw new AppError("You can only generate your own certificate", 403);
     }
 
-    // Verify enrollment exists
     const enrollment = await prisma.enrollment.findFirst({
       where: {
         learnerId,
@@ -59,7 +87,6 @@ certificateRouter.post("/generate", async (req, res, next) => {
       throw new AppError("Enrollment not found", 404);
     }
 
-    // Check if certificate already exists
     const existing = await prisma.certificate.findFirst({
       where: { learnerId, courseId, batchId: batchId ?? null },
     });
@@ -72,7 +99,6 @@ certificateRouter.post("/generate", async (req, res, next) => {
       });
     }
 
-    // Require 100% progress
     if (enrollment.progress < 100) {
       throw new AppError(
         `Course not completed yet. Progress: ${enrollment.progress}%`,
@@ -80,7 +106,6 @@ certificateRouter.post("/generate", async (req, res, next) => {
       );
     }
 
-    // Create certificate
     const certificate = await prisma.certificate.create({
       data: {
         certificateCode: generateCertificateCode(),
@@ -98,13 +123,11 @@ certificateRouter.post("/generate", async (req, res, next) => {
       },
     });
 
-    // Mark enrollment as COMPLETED
     await prisma.enrollment.update({
       where: { id: enrollment.id },
       data: { status: "COMPLETED", completedAt: new Date() },
     });
 
-    // Notify learner
     await prisma.notification.create({
       data: {
         userId: learnerId,
@@ -158,13 +181,7 @@ certificateRouter.get("/my/:learnerId", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 3. GET /verify/:code — Verify a certificate (PUBLIC)
-//    ⚠️ This route must NOT require auth — anyone can verify
-// ═══════════════════════════════════════════════════════════
-// (Handled separately below)
-
-// ═══════════════════════════════════════════════════════════
-// 4. GET /course/:courseId — All certificates for a course (ADMIN only)
+// 3. GET /course/:courseId — All certificates for a course (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 certificateRouter.get(
   "/course/:courseId",
@@ -194,7 +211,7 @@ certificateRouter.get(
 );
 
 // ═══════════════════════════════════════════════════════════
-// 5. GET /:id — Get a single certificate
+// 4. GET /:id — Get a single certificate
 // ═══════════════════════════════════════════════════════════
 certificateRouter.get("/:id", async (req, res, next) => {
   try {
@@ -224,8 +241,7 @@ certificateRouter.get("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 6. DELETE /:id — Hard delete a certificate (ADMIN only)
-//    Note: Certificate model has no isDeleted — hard delete is intended
+// 5. DELETE /:id — Hard delete a certificate (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 certificateRouter.delete(
   "/:id",

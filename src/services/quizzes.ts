@@ -10,15 +10,47 @@ const quizRouter = Router();
 quizRouter.use(authMiddleware);
 
 // ═══════════════════════════════════════════════════════════
+// Helper: Check if learner is enrolled in the course of a lesson
+// ═══════════════════════════════════════════════════════════
+async function verifyEnrollment(learnerId: string, lessonId: string) {
+  const lesson = await prisma.lesson.findUnique({
+    where: { id: lessonId },
+    include: { module: true },
+  });
+
+  if (!lesson || lesson.isDeleted) {
+    throw new AppError("Lesson not found", 404);
+  }
+
+  const enrollment = await prisma.enrollment.findFirst({
+    where: {
+      learnerId,
+      courseId: lesson.module.courseId,
+      ...(lesson.module.batchId && { batchId: lesson.module.batchId }),
+      status: { in: ["ACTIVE", "COMPLETED"] },
+      isDeleted: false,
+    },
+  });
+
+  if (!enrollment) {
+    throw new AppError("You are not enrolled in this course", 403);
+  }
+
+  return enrollment;
+}
+
+// ═══════════════════════════════════════════════════════════
 // 1. POST / — Create a quiz question (ADMIN only)
-//    Body: { lessonId, question, options, correctAnswer, order }
 // ═══════════════════════════════════════════════════════════
 quizRouter.post("/", roleMiddleware("ADMIN"), async (req, res, next) => {
   try {
     const { lessonId, question, options, correctAnswer, order } = req.body;
 
     if (!lessonId || !question || !options || !correctAnswer) {
-      throw new AppError("lessonId, question, options, and correctAnswer are required", 400);
+      throw new AppError(
+        "lessonId, question, options, and correctAnswer are required",
+        400
+      );
     }
 
     if (!Array.isArray(options) || options.length < 2) {
@@ -61,7 +93,6 @@ quizRouter.post("/", roleMiddleware("ADMIN"), async (req, res, next) => {
 
 // ═══════════════════════════════════════════════════════════
 // 2. POST /bulk — Create multiple quizzes at once (ADMIN only)
-//    Body: { lessonId, quizzes: [{ question, options, correctAnswer, order }] }
 // ═══════════════════════════════════════════════════════════
 quizRouter.post("/bulk", roleMiddleware("ADMIN"), async (req, res, next) => {
   try {
@@ -83,13 +114,19 @@ quizRouter.post("/bulk", roleMiddleware("ADMIN"), async (req, res, next) => {
     for (let i = 0; i < quizzes.length; i++) {
       const q = quizzes[i];
       if (!q.question || !q.options || !q.correctAnswer) {
-        throw new AppError(`Quiz ${i + 1}: question, options, correctAnswer are required`, 400);
+        throw new AppError(
+          `Quiz ${i + 1}: question, options, correctAnswer are required`,
+          400
+        );
       }
       if (!Array.isArray(q.options) || q.options.length < 2) {
         throw new AppError(`Quiz ${i + 1}: options must have at least 2 items`, 400);
       }
       if (!q.options.includes(q.correctAnswer)) {
-        throw new AppError(`Quiz ${i + 1}: correctAnswer must be one of the options`, 400);
+        throw new AppError(
+          `Quiz ${i + 1}: correctAnswer must be one of the options`,
+          400
+        );
       }
     }
 
@@ -122,21 +159,46 @@ quizRouter.post("/bulk", roleMiddleware("ADMIN"), async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 3. GET /lesson/:lessonId — Get all quizzes for a lesson
+// 3. GET /lesson/:lessonId — Get quizzes for a lesson
+//    ⚠️ SECURITY: correctAnswer hidden for LEARNER
+//    ⚠️ Query: ?mode=admin to get full data (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 quizRouter.get("/lesson/:lessonId", async (req, res, next) => {
   try {
     const lessonId = req.params.lessonId as string;
+    const mode = req.query.mode as string | undefined;
 
     const quizzes = await prisma.quiz.findMany({
       where: { lessonId },
       orderBy: { order: "asc" },
     });
 
+    // If ADMIN or mode=admin → return full data with correctAnswer
+    const isAdmin = req.user!.role === "ADMIN";
+    const wantsAdminView = mode === "admin" && isAdmin;
+
+    if (wantsAdminView) {
+      return sendResponse({
+        res,
+        message: "Quizzes fetched successfully",
+        data: { quizzes, total: quizzes.length },
+      });
+    }
+
+    // For learners: HIDE correctAnswer
+    const sanitized = quizzes.map((q) => ({
+      id: q.id,
+      lessonId: q.lessonId,
+      question: q.question,
+      options: q.options,
+      order: q.order,
+      // correctAnswer NOT included
+    }));
+
     sendResponse({
       res,
       message: "Quizzes fetched successfully",
-      data: { quizzes, total: quizzes.length },
+      data: { quizzes: sanitized, total: sanitized.length },
     });
   } catch (error) {
     next(error);
@@ -152,6 +214,11 @@ quizRouter.get(
     try {
       const lessonId = req.params.lessonId as string;
       const learnerId = req.params.learnerId as string;
+
+      // Only self or admin
+      if (req.user!.userId !== learnerId && req.user!.role !== "ADMIN") {
+        throw new AppError("You can only view your own attempts", 403);
+      }
 
       const quizzes = await prisma.quiz.findMany({ where: { lessonId } });
       const quizIds = quizzes.map((q) => q.id);
@@ -180,7 +247,7 @@ quizRouter.get(
 );
 
 // ═══════════════════════════════════════════════════════════
-// 5. GET /:id — Get a single quiz
+// 5. GET /:id — Get a single quiz (with correctAnswer for ADMIN)
 // ═══════════════════════════════════════════════════════════
 quizRouter.get("/:id", async (req, res, next) => {
   try {
@@ -195,10 +262,21 @@ quizRouter.get("/:id", async (req, res, next) => {
 
     if (!quiz) throw new AppError("Quiz not found", 404);
 
+    // Only ADMIN sees correctAnswer
+    if (req.user!.role === "ADMIN") {
+      return sendResponse({
+        res,
+        message: "Quiz fetched successfully",
+        data: quiz,
+      });
+    }
+
+    const { correctAnswer, ...rest } = quiz;
+
     sendResponse({
       res,
       message: "Quiz fetched successfully",
-      data: quiz,
+      data: rest,
     });
   } catch (error) {
     next(error);
@@ -245,7 +323,6 @@ quizRouter.patch("/:id", roleMiddleware("ADMIN"), async (req, res, next) => {
 
 // ═══════════════════════════════════════════════════════════
 // 7. DELETE /:id — Hard delete a quiz (ADMIN only)
-//    Note: Quiz model has no isDeleted field, so hard delete is intended.
 // ═══════════════════════════════════════════════════════════
 quizRouter.delete("/:id", roleMiddleware("ADMIN"), async (req, res, next) => {
   try {
@@ -265,6 +342,7 @@ quizRouter.delete("/:id", roleMiddleware("ADMIN"), async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════
 // 8. POST /:id/attempt — Submit an answer to a single quiz
 //    Body: { learnerId, selectedAnswer }
+//    ⚠️ Only learner themselves can submit
 // ═══════════════════════════════════════════════════════════
 quizRouter.post("/:id/attempt", async (req, res, next) => {
   try {
@@ -275,8 +353,19 @@ quizRouter.post("/:id/attempt", async (req, res, next) => {
       throw new AppError("learnerId and selectedAnswer are required", 400);
     }
 
-    const quiz = await prisma.quiz.findUnique({ where: { id: quizId } });
+    // Only self or ADMIN
+    if (req.user!.userId !== learnerId && req.user!.role !== "ADMIN") {
+      throw new AppError("You can only submit your own answers", 403);
+    }
+
+    const quiz = await prisma.quiz.findUnique({
+      where: { id: quizId },
+      include: { lesson: { include: { module: true } } },
+    });
     if (!quiz) throw new AppError("Quiz not found", 404);
+
+    // Verify enrollment in the course of this quiz's lesson
+    await verifyEnrollment(learnerId, quiz.lessonId);
 
     const isCorrect = quiz.correctAnswer === selectedAnswer;
 
@@ -298,6 +387,7 @@ quizRouter.post("/:id/attempt", async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════
 // 9. POST /lesson/:lessonId/submit — Submit entire quiz
 //    Body: { learnerId, answers: [{ quizId, selectedAnswer }] }
+//    ⚠️ Only learner themselves can submit
 // ═══════════════════════════════════════════════════════════
 quizRouter.post("/lesson/:lessonId/submit", async (req, res, next) => {
   try {
@@ -307,6 +397,14 @@ quizRouter.post("/lesson/:lessonId/submit", async (req, res, next) => {
     if (!learnerId || !Array.isArray(answers)) {
       throw new AppError("learnerId and answers array are required", 400);
     }
+
+    // Only self or ADMIN
+    if (req.user!.userId !== learnerId && req.user!.role !== "ADMIN") {
+      throw new AppError("You can only submit your own answers", 403);
+    }
+
+    // Verify enrollment
+    await verifyEnrollment(learnerId, lessonId);
 
     const quizzes = await prisma.quiz.findMany({ where: { lessonId } });
     if (quizzes.length === 0) {

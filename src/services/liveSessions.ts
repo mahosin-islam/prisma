@@ -10,9 +10,27 @@ const liveSessionRouter = Router();
 liveSessionRouter.use(authMiddleware);
 
 // ═══════════════════════════════════════════════════════════
+// Helper: Check if learner is enrolled in a batch
+// ═══════════════════════════════════════════════════════════
+async function verifyBatchEnrollment(learnerId: string, batchId: string) {
+  const enrollment = await prisma.enrollment.findFirst({
+    where: {
+      learnerId,
+      batchId,
+      status: { in: ["ACTIVE", "COMPLETED"] },
+      isDeleted: false,
+    },
+  });
+
+  if (!enrollment) {
+    throw new AppError("You are not enrolled in this batch", 403);
+  }
+
+  return enrollment;
+}
+
+// ═══════════════════════════════════════════════════════════
 // 1. POST / — Create a new live session (ADMIN only)
-//    Body: { batchId, title, description?, meetingLink,
-//            scheduledAt, duration?, notifyStudents? }
 // ═══════════════════════════════════════════════════════════
 liveSessionRouter.post(
   "/",
@@ -36,7 +54,6 @@ liveSessionRouter.post(
         );
       }
 
-      // Check if batch exists
       const batch = await prisma.batch.findUnique({
         where: { id: batchId },
         include: { course: true },
@@ -46,7 +63,6 @@ liveSessionRouter.post(
         throw new AppError("Batch not found", 404);
       }
 
-      // Create live session
       const session = await prisma.liveSession.create({
         data: {
           batchId,
@@ -63,10 +79,14 @@ liveSessionRouter.post(
         },
       });
 
-      // Send notifications to enrolled students
+      // Send notifications — include both ACTIVE and COMPLETED enrollments
       if (notifyStudents) {
         const enrollments = await prisma.enrollment.findMany({
-          where: { batchId, status: "ACTIVE", isDeleted: false },
+          where: {
+            batchId,
+            status: { in: ["ACTIVE", "COMPLETED"] },   // ✅ FIXED
+            isDeleted: false,
+          },
           select: { learnerId: true },
         });
 
@@ -78,7 +98,7 @@ liveSessionRouter.post(
               type: "NEW_LIVE_CLASS",
               title: "New Live Class",
               message: `${title} — ${new Date(scheduledAt).toLocaleString()}`,
-              link: `/live-sessions/${session.id}`,
+              link: `/learner/live-sessions`,
             })),
           });
         }
@@ -99,44 +119,23 @@ liveSessionRouter.post(
 );
 
 // ═══════════════════════════════════════════════════════════
-// 2. GET /batch/:batchId — Get all live sessions of a batch
-//    Query: ?upcoming=true (only future sessions)
-// ═══════════════════════════════════════════════════════════
-liveSessionRouter.get("/batch/:batchId", async (req, res, next) => {
-  try {
-    const batchId = req.params.batchId as string;
-    const upcoming = req.query.upcoming === "true";
-
-    const sessions = await prisma.liveSession.findMany({
-      where: {
-        batchId,
-        isDeleted: false,
-        ...(upcoming && { scheduledAt: { gte: new Date() } }),
-      },
-      orderBy: { scheduledAt: upcoming ? "asc" : "desc" },
-    });
-
-    sendResponse({
-      res,
-      message: "Live sessions fetched successfully",
-      data: { sessions, total: sessions.length },
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// ═══════════════════════════════════════════════════════════
-// 3. GET /my/:learnerId — Get all live sessions for a learner
+// 2. GET /my/:learnerId — Get all live sessions for a learner
+//    ⚠️ Must be BEFORE /:id route
+//    ⚠️ Self/Admin check
 // ═══════════════════════════════════════════════════════════
 liveSessionRouter.get("/my/:learnerId", async (req, res, next) => {
   try {
     const learnerId = req.params.learnerId as string;
 
+    // Only self or ADMIN
+    if (req.user!.userId !== learnerId && req.user!.role !== "ADMIN") {
+      throw new AppError("You can only view your own sessions", 403);
+    }
+
     const enrollments = await prisma.enrollment.findMany({
       where: {
         learnerId,
-        status: "ACTIVE",
+        status: { in: ["ACTIVE", "COMPLETED"] },   // ✅ FIXED
         isDeleted: false,
         batchId: { not: null },
       },
@@ -172,46 +171,33 @@ liveSessionRouter.get("/my/:learnerId", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 4. GET /:id — Get a single live session
+// 3. GET /batch/:batchId — Get all live sessions of a batch
+//    ⚠️ Must be BEFORE /:id route
+//    ⚠️ Learner must be enrolled OR admin
 // ═══════════════════════════════════════════════════════════
-liveSessionRouter.get("/:id", async (req, res, next) => {
+liveSessionRouter.get("/batch/:batchId", async (req, res, next) => {
   try {
-    const id = req.params.id as string;
+    const batchId = req.params.batchId as string;
+    const upcoming = req.query.upcoming === "true";
 
-    const session = await prisma.liveSession.findUnique({
-      where: { id },
-      include: {
-        batch: {
-          select: {
-            id: true,
-            batchNumber: true,
-            title: true,
-            course: { select: { id: true, title: true, slug: true } },
-          },
-        },
-      },
-    });
-
-    if (!session || session.isDeleted) {
-      throw new AppError("Live session not found", 404);
+    // Verify enrollment (unless admin)
+    if (req.user!.role !== "ADMIN") {
+      await verifyBatchEnrollment(req.user!.userId, batchId);
     }
 
-    // Compute session status based on schedule
-    const now = new Date();
-    const sessionEnd = new Date(
-      session.scheduledAt.getTime() + session.duration * 60 * 1000
-    );
-
-    const isLive = now >= session.scheduledAt && now <= sessionEnd;
-    const isUpcoming = now < session.scheduledAt;
+    const sessions = await prisma.liveSession.findMany({
+      where: {
+        batchId,
+        isDeleted: false,
+        ...(upcoming && { scheduledAt: { gte: new Date() } }),
+      },
+      orderBy: { scheduledAt: upcoming ? "asc" : "desc" },
+    });
 
     sendResponse({
       res,
-      message: "Live session fetched successfully",
-      data: {
-        ...session,
-        status: isLive ? "LIVE" : isUpcoming ? "UPCOMING" : "ENDED",
-      },
+      message: "Live sessions fetched successfully",
+      data: { sessions, total: sessions.length },
     });
   } catch (error) {
     next(error);
@@ -219,7 +205,7 @@ liveSessionRouter.get("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 5. PATCH /:id — Update a live session (ADMIN only)
+// 4. PATCH /:id — Update a live session (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 liveSessionRouter.patch(
   "/:id",
@@ -261,7 +247,7 @@ liveSessionRouter.patch(
 );
 
 // ═══════════════════════════════════════════════════════════
-// 6. DELETE /:id — Soft delete a live session (ADMIN only)
+// 5. DELETE /:id — Soft delete a live session (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 liveSessionRouter.delete(
   "/:id",
@@ -286,5 +272,65 @@ liveSessionRouter.delete(
     }
   }
 );
+
+// ═══════════════════════════════════════════════════════════
+// 6. GET /:id — Get a single live session
+//    ⚠️ Must be LAST
+//    ⚠️ Learner must be enrolled in the batch OR admin
+//    ⚠️ Meeting link only revealed when LIVE
+// ═══════════════════════════════════════════════════════════
+liveSessionRouter.get("/:id", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+
+    const session = await prisma.liveSession.findUnique({
+      where: { id },
+      include: {
+        batch: {
+          select: {
+            id: true,
+            batchNumber: true,
+            title: true,
+            course: { select: { id: true, title: true, slug: true } },
+          },
+        },
+      },
+    });
+
+    if (!session || session.isDeleted) {
+      throw new AppError("Live session not found", 404);
+    }
+
+    // Verify enrollment for learners
+    if (req.user!.role !== "ADMIN") {
+      await verifyBatchEnrollment(req.user!.userId, session.batchId);
+    }
+
+    // Compute status
+    const now = new Date();
+    const sessionEnd = new Date(
+      session.scheduledAt.getTime() + session.duration * 60 * 1000
+    );
+
+    const isLive = now >= session.scheduledAt && now <= sessionEnd;
+    const isUpcoming = now < session.scheduledAt;
+
+    // Only reveal meeting link when LIVE (or for admin)
+    const isAdmin = req.user!.role === "ADMIN";
+    const shouldRevealLink = isLive || isAdmin;
+
+    sendResponse({
+      res,
+      message: "Live session fetched successfully",
+      data: {
+        ...session,
+        meetingLink: shouldRevealLink ? session.meetingLink : null,
+        status: isLive ? "LIVE" : isUpcoming ? "UPCOMING" : "ENDED",
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 export default liveSessionRouter;

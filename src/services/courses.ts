@@ -8,8 +8,7 @@ import { roleMiddleware } from "../middlewares/role.middleware.js";
 const courseRouter = Router();
 
 // ═══════════════════════════════════════════════════════════
-// ১. POST / — নতুন কোর্স তৈরি (শুধু ADMIN)
-//    URL: POST /api/v1/courses
+// 1. POST / — Create a new course (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 courseRouter.post(
   "/",
@@ -85,8 +84,7 @@ courseRouter.post(
 );
 
 // ═══════════════════════════════════════════════════════════
-// ২. GET / — সব কোর্স দেখা (পাবলিক)
-//    URL: GET /api/v1/courses
+// 2. GET / — Get all courses (PUBLIC)
 // ═══════════════════════════════════════════════════════════
 courseRouter.get("/", async (req, res, next) => {
   try {
@@ -149,12 +147,46 @@ courseRouter.get("/", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৩. GET /:id — একটা কোর্স দেখা (পাবলিক)
-//    URL: GET /api/v1/courses/:id
+// 3. GET /:id — Get a single course (PUBLIC)
+//    ⚠️ SECURITY: videoId/videoUrl hidden for non-free lessons
+//    unless the requester is an ADMIN or has an active enrollment.
 // ═══════════════════════════════════════════════════════════
 courseRouter.get("/:id", async (req, res, next) => {
   try {
     const id = req.params.id as string;
+
+    // Determine if requester is enrolled or admin
+    // (authMiddleware is not applied here — token is optional for this public route)
+    let isAdmin = false;
+    let hasEnrollment = false;
+
+    // Try to read the token from headers manually (optional)
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      try {
+        // Import verifyToken inline to avoid circular deps
+        const { verifyToken } = await import("../utils/jwt.js");
+        const token = authHeader.split(" ")[1];
+        if (token) {
+          const payload = verifyToken(token);
+          isAdmin = payload.role === "ADMIN";
+
+          if (!isAdmin) {
+            const enrollment = await prisma.enrollment.findFirst({
+              where: {
+                learnerId: payload.userId,
+                courseId: id,
+                status: { in: ["ACTIVE", "COMPLETED", "PENDING"] },
+                isDeleted: false,
+              },
+            });
+            hasEnrollment = !!enrollment;
+          }
+        }
+      } catch {
+        // Invalid token — ignore, treat as anonymous
+      }
+    }
 
     const course = await prisma.course.findUnique({
       where: { id },
@@ -222,10 +254,33 @@ courseRouter.get("/:id", async (req, res, next) => {
       throw new AppError("Course not found", 404);
     }
 
+    // Sanitize lessons — hide video content for non-free lessons
+    // unless the requester is an admin or an enrolled learner.
+    const canSeeFullContent = isAdmin || hasEnrollment;
+
+    const sanitizedModules = course.modules.map((mod) => ({
+      ...mod,
+      lessons: mod.lessons.map((lesson) => {
+        if (canSeeFullContent || lesson.isFree) {
+          return lesson;
+        }
+        // Hide content fields for non-free lessons
+        return {
+          ...lesson,
+          videoId: null,
+          videoUrl: null,
+          provider: null,
+        };
+      }),
+    }));
+
     sendResponse({
       res,
       message: "Course fetched successfully",
-      data: course,
+      data: {
+        ...course,
+        modules: sanitizedModules,
+      },
     });
   } catch (error) {
     next(error);
@@ -233,8 +288,7 @@ courseRouter.get("/:id", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// ৪. PATCH /:id — কোর্স আপডেট (শুধু ADMIN)
-//    URL: PATCH /api/v1/courses/:id
+// 4. PATCH /:id — Update a course (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 courseRouter.patch(
   "/:id",
@@ -303,8 +357,7 @@ courseRouter.patch(
 );
 
 // ═══════════════════════════════════════════════════════════
-// ৫. DELETE /:id — সফট ডিলিট (শুধু ADMIN)
-//    URL: DELETE /api/v1/courses/:id
+// 5. DELETE /:id — Soft delete (ADMIN only)
 // ═══════════════════════════════════════════════════════════
 courseRouter.delete(
   "/:id",

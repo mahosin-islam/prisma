@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../lib/prisma.js";
 import { sendResponse } from "../utils/response.js";
+import { AppError } from "../utils/AppError.js";
 import { authMiddleware } from "../middlewares/auth.middleware.js";
 import { roleMiddleware } from "../middlewares/role.middleware.js";
 
@@ -371,11 +372,16 @@ dashboardRouter.get(
 
 // ═══════════════════════════════════════════════════════════
 // 7. GET /learner/:learnerId — Learner's personal dashboard
-//    ⚠️ Any authenticated user can view their own dashboard
+//    ⚠️ Only the learner themselves OR an ADMIN
 // ═══════════════════════════════════════════════════════════
 dashboardRouter.get("/learner/:learnerId", async (req, res, next) => {
   try {
     const learnerId = req.params.learnerId as string;
+
+    // ✅ FIX: Only self or ADMIN can access
+    if (req.user!.userId !== learnerId && req.user!.role !== "ADMIN") {
+      throw new AppError("You can only view your own dashboard", 403);
+    }
 
     const [
       totalEnrollments,
