@@ -89,13 +89,13 @@ progressRouter.post("/complete", async (req, res, next) => {
       throw new AppError("Lesson not found", 404);
     }
 
-    // Check if learner is enrolled
+    // Check if learner is enrolled (allow ACTIVE or COMPLETED)
     const enrollment = await prisma.enrollment.findFirst({
       where: {
         learnerId,
         courseId: lesson.module.courseId,
         ...(lesson.module.batchId && { batchId: lesson.module.batchId }),
-        status: "ACTIVE",
+        status: { in: ["ACTIVE", "COMPLETED"] },
         isDeleted: false,
       },
     });
@@ -123,8 +123,9 @@ progressRouter.post("/complete", async (req, res, next) => {
       },
     });
 
-    // Unlock the next lesson
-    const nextLesson = await prisma.lesson.findFirst({
+    // ── Unlock the next lesson ──
+    // Step 1: Try to find next lesson in the SAME module
+    let nextLesson = await prisma.lesson.findFirst({
       where: {
         moduleId: lesson.moduleId,
         order: { gt: lesson.order },
@@ -133,6 +134,32 @@ progressRouter.post("/complete", async (req, res, next) => {
       orderBy: { order: "asc" },
     });
 
+    // Step 2: If no next lesson in same module → find first lesson
+    // of the NEXT module (same course + batch)
+    if (!nextLesson) {
+      const nextModule = await prisma.module.findFirst({
+        where: {
+          courseId: lesson.module.courseId,
+          batchId: lesson.module.batchId,
+          order: { gt: lesson.module.order },
+          isDeleted: false,
+        },
+        orderBy: { order: "asc" },
+        include: {
+          lessons: {
+            where: { isDeleted: false, isPublished: true },
+            orderBy: { order: "asc" },
+            take: 1,
+          },
+        },
+      });
+
+      if (nextModule && nextModule.lessons.length > 0) {
+        nextLesson = nextModule.lessons[0]!;
+      }
+    }
+
+    // Step 3: Unlock the found lesson
     if (nextLesson) {
       await prisma.lessonProgress.upsert({
         where: {
@@ -259,7 +286,7 @@ progressRouter.get("/lesson/:lessonId/check", async (req, res, next) => {
         learnerId,
         courseId: lesson.module.courseId,
         ...(lesson.module.batchId && { batchId: lesson.module.batchId }),
-        status: "ACTIVE",
+        status: { in: ["ACTIVE", "COMPLETED"] },
         isDeleted: false,
       },
     });
@@ -331,7 +358,9 @@ progressRouter.post("/unlock-first", async (req, res, next) => {
       where: {
         courseId,
         isDeleted: false,
-        ...(batchId ? { batchId } : { batchId: null }),
+        ...(batchId !== undefined
+          ? { batchId: batchId || null }
+          : { batchId: null }),
       },
       orderBy: { order: "asc" },
       include: {
