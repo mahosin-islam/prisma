@@ -116,26 +116,33 @@ paymentRouter.get(
 
 // ═══════════════════════════════════════════════════════════
 // 3. GET /stats/all — Admin earning stats (ADMIN only)
+//    Query: ?courseId=xxx&batchId=yyy  (optional filters)
 // ═══════════════════════════════════════════════════════════
 paymentRouter.get(
   "/stats/all",
   roleMiddleware("ADMIN"),
-  async (_req, res, next) => {
+  async (req, res, next) => {
     try {
+      const { courseId, batchId } = req.query;
+
+      const where: any = { isDeleted: false };
+      if (courseId && courseId !== "all") where.courseId = String(courseId);
+      if (batchId && batchId !== "all") where.batchId = String(batchId);
+
       const [totalEarning, pendingCount, paidCount, failedCount] =
         await Promise.all([
           prisma.order.aggregate({
-            where: { status: "PAID", isDeleted: false },
+            where: { ...where, status: "PAID" },
             _sum: { amount: true },
           }),
           prisma.order.count({
-            where: { status: "PENDING", isDeleted: false },
+            where: { ...where, status: "PENDING" },
           }),
           prisma.order.count({
-            where: { status: "PAID", isDeleted: false },
+            where: { ...where, status: "PAID" },
           }),
           prisma.order.count({
-            where: { status: "FAILED", isDeleted: false },
+            where: { ...where, status: "FAILED" },
           }),
         ]);
 
@@ -156,7 +163,51 @@ paymentRouter.get(
 );
 
 // ═══════════════════════════════════════════════════════════
-// 4. GET /my/:learnerId — Learner's payment history
+// 4. GET /all — All payments with filters (ADMIN only)
+//    Query: ?courseId=xxx&batchId=yyy&status=PENDING|PAID|FAILED
+//    ⚠️ MUST be before /:id route
+// ═══════════════════════════════════════════════════════════
+paymentRouter.get(
+  "/all",
+  roleMiddleware("ADMIN"),
+  async (req, res, next) => {
+    try {
+      const { courseId, batchId, status } = req.query;
+
+      const where: any = { isDeleted: false };
+      if (courseId && courseId !== "all") where.courseId = String(courseId);
+      if (batchId && batchId !== "all") where.batchId = String(batchId);
+      if (status && status !== "all") where.status = String(status);
+
+      const orders = await prisma.order.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        include: {
+          learner: {
+            select: { id: true, name: true, email: true, avatar: true },
+          },
+          course: {
+            select: { id: true, title: true, slug: true, thumbnail: true },
+          },
+          batch: {
+            select: { id: true, batchNumber: true, title: true },
+          },
+        },
+      });
+
+      sendResponse({
+        res,
+        message: "All payments fetched successfully",
+        data: { orders, total: orders.length },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════
+// 5. GET /my/:learnerId — Learner's payment history
 // ═══════════════════════════════════════════════════════════
 paymentRouter.get("/my/:learnerId", async (req, res, next) => {
   try {
@@ -182,7 +233,7 @@ paymentRouter.get("/my/:learnerId", async (req, res, next) => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 5. PATCH /:id/verify — Admin verifies payment (ADMIN only)
+// 6. PATCH /:id/verify — Admin verifies payment (ADMIN only)
 //    Body: { action: "APPROVE" | "REJECT", note? }
 // ═══════════════════════════════════════════════════════════
 paymentRouter.patch(
@@ -302,7 +353,8 @@ paymentRouter.patch(
 );
 
 // ═══════════════════════════════════════════════════════════
-// 6. GET /:id — Get a single payment
+// 7. GET /:id — Get a single payment
+//    ⚠️ MUST be LAST
 // ═══════════════════════════════════════════════════════════
 paymentRouter.get("/:id", async (req, res, next) => {
   try {
