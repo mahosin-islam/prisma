@@ -112,7 +112,13 @@ enrollmentRouter.post("/", async (req, res, next) => {
           },
         },
         batch: {
-          select: { id: true, batchNumber: true, title: true, status: true },
+          select: {
+            id: true,
+            batchNumber: true,
+            title: true,
+            status: true,
+            certificateUnlocked: true,   // 🆕 ADDED
+          },
         },
       },
     });
@@ -149,14 +155,9 @@ enrollmentRouter.post("/", async (req, res, next) => {
   }
 });
 
-
-
-
-
-
-
 // ═══════════════════════════════════════════════════════════
 // 2. GET /my/:learnerId — Get all enrollments for a learner
+//    ⚠️ Includes certificateUnlocked for batch-based courses
 // ═══════════════════════════════════════════════════════════
 enrollmentRouter.get("/my/:learnerId", async (req, res, next) => {
   try {
@@ -185,6 +186,7 @@ enrollmentRouter.get("/my/:learnerId", async (req, res, next) => {
             startDate: true,
             endDate: true,
             status: true,
+            certificateUnlocked: true,   // 🆕 ADDED — CRITICAL FIX
           },
         },
       },
@@ -218,7 +220,12 @@ enrollmentRouter.get(
             select: { id: true, name: true, email: true, avatar: true },
           },
           batch: {
-            select: { id: true, batchNumber: true, title: true },
+            select: {
+              id: true,
+              batchNumber: true,
+              title: true,
+              certificateUnlocked: true,   // 🆕 ADDED
+            },
           },
         },
       });
@@ -389,7 +396,7 @@ enrollmentRouter.get("/:id", async (req, res, next) => {
           select: { id: true, name: true, email: true, avatar: true },
         },
         course: true,
-        batch: true,
+        batch: true,   // full batch (all fields including certificateUnlocked)
       },
     });
 
